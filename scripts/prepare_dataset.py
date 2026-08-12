@@ -11,6 +11,7 @@
   · width/height 는 문자열 → int 변환
   · 한 아카이브에 한 단계만 있을 수 있음, 개체 단위 시계열
   · labeled/source 짝의 stem 교집합이 0 이면 데이터가 깨진 것 (재다운로드 필요)
+  · 추출본에서 한쪽만 존재하는 JSON/JPG는 삭제하고, 양쪽이 있는 stem만 index에 등록
 
 group_id 견고화 (판단 D-01): 실제 TL_42 는 stem 이 JSON crops_id 로 시작하지
   않는다(stem=C26_L01_07_..., crops_id=C26_L04_01). 이 경우에도 개체 단위 누수를
@@ -31,7 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tasks.leafscan import (CANON_CROPS, CANON_STAGES, FOLDER_TO_CROP,
                             order_present)
 
-ARCHIVE_RE = re.compile(r"^(TL|TS|VL|VS)_3\.(.+?)(\d+)\.tar$")
+# AI Hub archive names in this project are supplied in both v2 and v3 forms,
+# e.g. TL_2.근대1.tar and TL_3.상추1.tar.  The version does not change the
+# training/validation or labeled/source role, which is determined by TL/TS/VL/VS.
+ARCHIVE_RE = re.compile(r"^(TL|TS|VL|VS)_[1234]\.(.+?)(\d+)\.tar$")
 ROLE = {"TL": ("training", "labeled"), "TS": ("training", "source"),
         "VL": ("validation", "labeled"), "VS": ("validation", "source")}
 INDEX_COLUMNS = ["path", "crop", "stage", "group_id", "archive", "split_source",
@@ -111,6 +115,10 @@ def validate_pairs(archives):
                                detail=(f"{lab.stem}({len(lab_stems)}건) ↔ "
                                        f"{src.stem}({len(src_stems)}건) 교집합 0건 "
                                        f"— 짝이 실제로 맞지 않습니다. 올바른 번호의 tar 를 받으세요")))
+            # 추출본 정리는 build_index에서 수행한다. 이 짝은 학습용 pairs에는
+            # 남겨 두되, hard error 처리에서 index 생성 대상에서는 제외한다.
+            pairs.append(dict(crop=crop, split=split, number=number,
+                              labeled=lab, source=src, stems=inter))
             continue
         if ratio < 0.95:
             errors.append(dict(kind="low_intersection", crop=crop, split=split,
@@ -141,6 +149,26 @@ def extract_archive(archive: Archive, extract_root: Path):
                 member.name = Path(member.name).name   # 평탄화
                 t.extract(member, dest, filter="data")
     return dest
+
+
+def reconcile_extracted_pair(lab_dir: Path, src_dir: Path):
+    """추출된 JSON/JPG를 stem으로 맞춘다.
+
+    양쪽에 있는 파일만 반환한다. 한쪽에만 있는 추출본 파일은 삭제한다.
+    원본 tar는 건드리지 않으며, 삭제 결과는 호출자가 manifest에 기록한다.
+    """
+    json_paths = {p.stem: p for p in lab_dir.rglob("*.json")}
+    jpg_paths = {p.stem: p for p in src_dir.rglob("*.jpg")}
+    common = set(json_paths) & set(jpg_paths)
+    json_only = set(json_paths) - common
+    jpg_only = set(jpg_paths) - common
+
+    for stem in json_only:
+        json_paths[stem].unlink()
+    for stem in jpg_only:
+        jpg_paths[stem].unlink()
+
+    return common, len(json_only), len(jpg_only)
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +233,16 @@ def build_index(data_root: Path, out_csv: Path, skip_broken=False,
         tag = "[경고]" if e.get("soft") else "[!!]"
         log(f"{tag} {e['crop']}/{e['split']} #{e['number']} — {e['detail']}")
 
+    # 교집합 0건인 짝도 이미 추출된 파일은 정리한다. 원본 tar는 보존되므로
+    # 올바른 짝을 받은 뒤 재실행하면 다시 추출할 수 있다.
+    for pair in (p for p in pairs if not p["stems"]):
+        lab_dir = extract_archive(pair["labeled"], extract_root)
+        src_dir = extract_archive(pair["source"], extract_root)
+        _stems, json_only, jpg_only = reconcile_extracted_pair(lab_dir, src_dir)
+        if json_only or jpg_only:
+            log(f"[정리] {pair['labeled'].stem} — JSON만 {json_only}건, "
+                f"JPG만 {jpg_only}건 삭제; 정상 쌍 0건")
+
     if hard and not skip_broken:
         log("")
         log("[중단] 짝이 맞지 않는 아카이브가 있습니다. 위 항목을 해결하거나")
@@ -227,8 +265,14 @@ def build_index(data_root: Path, out_csv: Path, skip_broken=False,
         lab_dir = extract_archive(pair["labeled"], extract_root)
         src_dir = extract_archive(pair["source"], extract_root)
         archive_name = pair["labeled"].stem
+        stems, json_only, jpg_only = reconcile_extracted_pair(lab_dir, src_dir)
+        if json_only or jpg_only:
+            excluded["json_only_deleted"] += json_only
+            excluded["jpg_only_deleted"] += jpg_only
+            log(f"[정리] {archive_name} — JSON만 {json_only}건, JPG만 {jpg_only}건 삭제; "
+                f"정상 쌍 {len(stems)}건")
         n_added = 0
-        for stem in sorted(pair["stems"]):
+        for stem in sorted(stems):
             jpath = lab_dir / f"{stem}.json"
             ipath = src_dir / f"{stem}.jpg"
             if not jpath.exists():
