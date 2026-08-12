@@ -1,0 +1,38 @@
+# LeafScan/04_팀_협업_규약.md §3.1 — 팀 합의된 제외 규칙 (직접 추가 금지, 규약 참조)
+data/
+.venv/
+__pycache__/
+mlruns/
+bundles/*/model.*
+
+runs/
+
+# Python 일반
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# 로그 / 임시
+*.log
+*.tmp
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / 로컬 도구
+.idea/
+.vscode/
+.omc/
+.claude/
+
