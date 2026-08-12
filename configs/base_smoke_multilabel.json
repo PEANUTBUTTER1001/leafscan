@@ -1,0 +1,7 @@
+{
+  "schema_version": 2, "dataset": "multilabel_fake", "subset": 96, "img_size": 32,
+  "val_ratio": 0.3, "arch": "resnet18", "epochs": 2, "batch_size": 32, "lr": 0.001,
+  "optimizer": "Adam", "patience": 0, "seed": 42, "num_workers": 0, "device": "cpu",
+  "head_weights": {"crop": 0.5, "stage": 0.5}, "class_weight": "none",
+  "hypothesis": "", "tags": [], "study": null, "parent_run": null
+}

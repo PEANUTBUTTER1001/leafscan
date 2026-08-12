@@ -1,0 +1,23 @@
+{
+  "dataset": "fake",
+  "data_root": "data",
+  "subset": 512,
+  "val_ratio": 0.3,
+  "augment": false,
+  "conv_channels": 16,
+  "kernel_size": 3,
+  "stride": 2,
+  "padding": 1,
+  "pool_kernel": 3,
+  "pool_stride": 2,
+  "conv_blocks": 1,
+  "use_relu": true,
+  "epochs": 3,
+  "batch_size": 32,
+  "lr": 0.001,
+  "optimizer": "Adam",
+  "patience": 0,
+  "seed": 42,
+  "num_workers": 0,
+  "device": "cpu"
+}
