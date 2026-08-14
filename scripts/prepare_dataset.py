@@ -1,6 +1,6 @@
 """prepare_dataset.py — 데이터 인제스트 (tar → index.csv) · P4a.
 
-05_데이터_명세서 §6 의 파이프라인:
+04_데이터_명세서 §6 의 파이프라인:
   ① 아카이브 짝 검증 → ② 추출 → ③ 파싱·조인 → ④ 품질검사 → ⑤⑥⑦ 산출
 
     python scripts/prepare_dataset.py --data-root data --out data/index.csv

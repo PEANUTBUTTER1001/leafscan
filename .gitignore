@@ -1,5 +1,6 @@
 # LeafScan/04_팀_협업_규약.md §3.1 — 팀 합의된 제외 규칙 (직접 추가 금지, 규약 참조)
 data/
+docs/
 .venv/
 __pycache__/
 mlruns/

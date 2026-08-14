@@ -84,9 +84,56 @@ def build_study_base_config(cfg, study_name, archs):
     if archs:
         out["arch"] = archs[0]
     out["study"] = study_name
-    out["hypothesis"] = ""      # Study 는 이름과 STUDY.md 로 식별한다
+    # Study 모드는 가설 입력칸을 숨기므로 사람이 쓸 기회가 없다.
+    # 리포트 §1 을 비워 두면 멤버마다 '⚠️ 미작성' 이 뜨므로 여기서 채운다.
+    # 해석(§7 결론)은 그대로 사람 몫이다.
+    out["hypothesis"] = study_hypothesis(study_name, archs)
     out["parent_run"] = None
     return out
+
+
+def study_hypothesis(study_name, archs):
+    """멤버 리포트 §1 에 들어갈 자동 가설 문구."""
+    if not archs:
+        return f"{study_name} — 같은 조건에서 모델을 비교한다."
+    return (f"{study_name} — 같은 조건에서 {len(archs)}개 모델을 비교한다 "
+            f"({', '.join(archs)}).")
+
+
+# Study 폴더 이름의 자동 번호 — 'study_01', 'study_02_backbone' 둘 다 인식한다.
+_STUDY_NUM = re.compile(r"^study_(\d+)")
+
+
+def next_study_name(runs_dir):
+    """runs/ 를 훑어 다음 Study 이름을 만든다 — 'study_03' 형식.
+
+    단일 실행의 exp_001·exp_002 자동 증가와 같은 규칙이다. 다만 exp 는 빈 번호를
+    찾아 채우는 반면, study 는 **최대 번호 + 1** 을 쓴다. study 는 재개를 위해
+    이름을 다시 입력하는 일이 있어, 지웠던 번호를 재사용하면 옛 폴더와 헷갈린다.
+
+    주제 접미사(`study_02_backbone`)는 사용자가 덧붙인다 — 번호만 읽는다.
+    """
+    runs_dir = Path(runs_dir)
+    used = set()
+    if runs_dir.exists():
+        for d in runs_dir.iterdir():
+            if not d.is_dir():
+                continue
+            m = _STUDY_NUM.match(d.name)
+            if m:
+                used.add(int(m.group(1)))
+    return f"study_{(max(used) + 1) if used else 1:02d}"
+
+
+def members_needing_report(study_dir, done=()):
+    """리포트를 만들어야 할 멤버 [(arch, run_dir)…] — 이미 처리한 것은 뺀다.
+
+    done 에는 모델 완료 시점(A)에 이미 후처리한 arch 를 넘긴다. Study 종료(B)에서
+    이 함수를 다시 불러 **재개로 건너뛴 멤버**처럼 A 가 놓친 것만 보충한다.
+    """
+    done = set(done)
+    return [(arch, run) for arch, run in sorted(collect_study_members(study_dir).items())
+            if arch not in done]
 
 
 # 비교 조건에 영향을 주지 않는 키 — 달라도 경고하지 않는다.
