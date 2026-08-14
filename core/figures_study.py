@@ -74,6 +74,10 @@ def runs_parallel(members, out_path):
         ax.plot(xs, norm[i], "o-", color=PALETTE[i % len(PALETTE)], label=label)
     ax.set_xticks(list(xs)); ax.set_xticklabels(axes_keys, rotation=20)
     ax.set_ylabel("정규화 값 (0~1)"); ax.set_title("평행좌표 — 설정↔지표")
+    # 모든 축이 상수면 norm 이 전부 0 이라 y 범위가 ±0.05 로 쪼그라든다.
+    # 그러면 아래 min/max 주석(y=-0.06, 1.02)이 축 밖으로 나가고
+    # savefig(bbox="tight") 가 캔버스를 그만큼 늘려 세로 수천 px 이미지가 나온다.
+    ax.set_ylim(-0.12, 1.12)
     ax.legend(fontsize=8)
     for xi, k in enumerate(axes_keys):
         ax.text(xi, -0.06, f"{mins[xi]:.3g}", fontsize=6, color=MUTED, ha="center")
