@@ -14,8 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.study_link import (build_study_base_config, collect_study_members,
-                             fmt_hms, parse_study_line, study_arch_from_run_name,
-                             study_config_diff, validate_study_name)
+                             fmt_hms, members_needing_report, next_study_name,
+                             parse_study_line, study_arch_from_run_name,
+                             study_config_diff, study_hypothesis,
+                             validate_study_name)
 
 
 def test_fmt_hms():
@@ -95,7 +97,9 @@ def test_build_study_base_config_drops_simple_cnn_keys():
         assert k not in out, k
     assert out["arch"] == "resnet18"        # --vary 가 run 마다 덮어쓴다
     assert out["study"] == "study_01"
-    assert out["hypothesis"] == ""
+    # Study 는 가설 입력칸이 없으므로 자동으로 채운다 (멤버 report.md §1)
+    assert "study_01" in out["hypothesis"]
+    assert "resnet18" in out["hypothesis"] and "resnet50" in out["hypothesis"]
     assert out["parent_run"] is None
     # 공통 학습 설정은 그대로 전달돼야 한다 (공정 비교)
     for k in ("epochs", "batch_size", "lr", "img_size", "seed"):
@@ -166,6 +170,93 @@ def test_study_config_diff_detects_added_key(tmp_path):
     base.write_text(json.dumps({"epochs": 2}), encoding="utf-8")
     diff = study_config_diff(base, {"epochs": 2, "batch_size": 64})
     assert diff == [("batch_size", None, 64)]
+
+
+# --------------------------------------------- Study 이름 자동 넘버링
+def _mkstudy(root, name, archs=("resnet18",), with_metrics=True):
+    """study 폴더와 멤버 run 을 만든다. with_metrics=False 면 미완료 run."""
+    sd = root / name
+    sd.mkdir(parents=True, exist_ok=True)
+    for a in archs:
+        m = sd / f"{name}__arch-{a}"
+        m.mkdir(exist_ok=True)
+        if with_metrics:
+            (m / "metrics.json").write_text("{}", encoding="utf-8")
+    return sd
+
+
+def test_next_study_name_empty(tmp_path):
+    assert next_study_name(tmp_path) == "study_01"
+
+
+def test_next_study_name_missing_dir(tmp_path):
+    """runs/ 가 아직 없어도 죽지 않는다."""
+    assert next_study_name(tmp_path / "없음") == "study_01"
+
+
+def test_next_study_name_with_suffix(tmp_path):
+    """주제 접미사가 붙어 있어도 번호만 읽는다."""
+    _mkstudy(tmp_path, "study_01_backbone")
+    assert next_study_name(tmp_path) == "study_02"
+
+
+def test_next_study_name_uses_max_not_gap(tmp_path):
+    """빈 번호를 재사용하지 않는다 — 지워진 study 와 헷갈리지 않게."""
+    _mkstudy(tmp_path, "study_01")
+    _mkstudy(tmp_path, "study_03_lr")
+    assert next_study_name(tmp_path) == "study_04"
+
+
+def test_next_study_name_two_digits(tmp_path):
+    _mkstudy(tmp_path, "study_09")
+    assert next_study_name(tmp_path) == "study_10"
+
+
+def test_next_study_name_ignores_non_study(tmp_path):
+    """exp_ run·파일·study 가 아닌 폴더는 세지 않는다."""
+    (tmp_path / "exp_007").mkdir()
+    (tmp_path / "studying").mkdir()
+    (tmp_path / "study_notanumber").mkdir()
+    (tmp_path / "study_05.txt").write_text("x", encoding="utf-8")
+    assert next_study_name(tmp_path) == "study_01"
+
+
+# --------------------------------------------- 멤버 리포트 대상 선별
+def test_members_needing_report_all(tmp_path):
+    sd = _mkstudy(tmp_path, "study_01", ["resnet18", "convnext_tiny"])
+    got = members_needing_report(sd)
+    assert [a for a, _ in got] == ["convnext_tiny", "resnet18"]
+
+
+def test_members_needing_report_excludes_done(tmp_path):
+    """모델 완료 시점(A)에 처리한 것은 Study 종료(B)에서 빼야 중복이 없다."""
+    sd = _mkstudy(tmp_path, "study_01", ["resnet18", "convnext_tiny"])
+    got = members_needing_report(sd, ["resnet18"])
+    assert [a for a, _ in got] == ["convnext_tiny"]
+
+
+def test_members_needing_report_skips_unfinished(tmp_path):
+    """metrics.json 이 없는 멤버(실패·발산)는 리포트를 만들 수 없다."""
+    sd = _mkstudy(tmp_path, "study_01", ["resnet18"])
+    (sd / "study_01__arch-resnet50").mkdir()          # metrics.json 없음
+    assert [a for a, _ in members_needing_report(sd)] == ["resnet18"]
+
+
+def test_members_needing_report_skips_helper_runs(tmp_path):
+    """'_' 로 시작하는 보조 run(_lrsearch)은 비교 대상이 아니다."""
+    sd = _mkstudy(tmp_path, "study_01", ["resnet18"])
+    helper = sd / "_lrsearch__arch-resnet18"
+    helper.mkdir()
+    (helper / "metrics.json").write_text("{}", encoding="utf-8")
+    assert [a for a, _ in members_needing_report(sd)] == ["resnet18"]
+
+
+def test_members_needing_report_empty_study(tmp_path):
+    assert members_needing_report(tmp_path / "없음") == []
+
+
+def test_study_hypothesis_without_archs():
+    assert "study_01" in study_hypothesis("study_01", [])
 
 
 if __name__ == "__main__":

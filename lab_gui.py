@@ -39,8 +39,11 @@ except ImportError:                                            # noqa: BLE001
     np = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from core.data_summary import format_summary, summarize_index
+from core.report import update_catalog
 from core.study_link import (build_study_base_config, collect_study_members,
-                             fmt_hms, parse_study_line, study_config_diff,
+                             fmt_hms, members_needing_report, next_study_name,
+                             parse_study_line, study_config_diff,
                              validate_study_name)
 
 BASE = Path(__file__).resolve().parent
@@ -79,6 +82,11 @@ ACCENT, WARN, OK = "#2f6f4f", "#b4432f", "#2f6f4f"
 
 ARCHS = ["simple_cnn", "resnet18", "mobilenet_v3_small",
          "efficientnet_b0", "resnet50", "convnext_tiny"]
+# Study 비교 대상 — simple_cnn 제외 (하네스 회귀 픽스처).
+# 사전학습 가중치가 없고 동결할 백본이 없어 freeze_epochs 가 무시되므로,
+# 같은 config 를 줘도 혼자 다른 조건으로 학습된다 → 공정 비교가 성립하지 않는다.
+# 근거: 01_기획서.md §4.1 · tasks/models_registry.py 의 is_fixture
+STUDY_ARCHS = [a for a in ARCHS if a != "simple_cnn"]
 # arch별 상대 학습시간 계수 (러프 추정용 — conv_blocks 대신)
 ARCH_COST = {"simple_cnn": 0.2, "resnet18": 1.0, "mobilenet_v3_small": 0.6,
              "efficientnet_b0": 1.3, "resnet50": 2.4, "convnext_tiny": 2.6}
@@ -123,7 +131,17 @@ DEFAULTS = {
 }
 # Study 모드 기본값 (초기화 대상)
 DEFAULT_MODE = "단일 실행"
-DEFAULT_STUDY_NAME = "study_01_backbone"
+
+
+def default_study_name():
+    """Study 이름 기본값 — runs/ 를 보고 다음 번호를 만든다 (study_03 형식).
+
+    상수가 아니라 함수인 이유: 고정 이름이면 새 Study 를 할 때마다 사용자가
+    직접 고쳐야 하고, 안 고치면 **다른 조건의 run 이 한 STUDY.md 에 섞인다.**
+    _build_vars() 와 '기본값 초기화' 가 이 함수를 공유해
+    "시작 상태 == 초기화 결과" 를 유지한다.
+    """
+    return next_study_name(RUNS)
 
 # 진행 표시 회전자 — 터미널·GUI 어디서도 깨지지 않는 ASCII
 SPINNER = "-\\|/"
@@ -381,6 +399,10 @@ class LabApp(tk.Tk):
         self.study_current = None
         self.study_started = None    # 소요 시간 계산용
         self._study_result = None    # (상태, 폴더, 요약) — 최종 완료 줄에 쓴다
+        # 멤버 리포트 후처리 — 모델 완료 시점(A)과 Study 종료(B)가 공유한다
+        self.member_reported = set()   # 이미 후처리한 arch (A·B 중복 방지)
+        self.member_q = queue.Queue()  # (arch, run_dir)
+        self.member_thread = None      # 워커 1개 = 동시 실행 1로 직렬화
         # 진행 표시 (로그 창의 마지막 줄을 덮어쓰는 라이브 줄)
         self._live_on = False
         self._spin = 0
@@ -430,9 +452,9 @@ class LabApp(tk.Tk):
         self.baseline_var = tk.StringVar(value="(없음)")
         # 실행 모드 — 기본은 단일 실행 (기존 동작)
         self.mode = tk.StringVar(value=DEFAULT_MODE)
-        self.study_name = tk.StringVar(value=DEFAULT_STUDY_NAME)
+        self.study_name = tk.StringVar(value=default_study_name())
         self.study_lr_search = tk.BooleanVar(value=False)
-        self.study_pick = {a: tk.BooleanVar(value=False) for a in ARCHS}
+        self.study_pick = {a: tk.BooleanVar(value=False) for a in STUDY_ARCHS}
         self.study_pick_text = tk.StringVar(value="선택 0개 — 최소 2개")
         self.v["lr_log"].trace_add("write", lambda *_: self._on_lr())
         self.v["arch"].trace_add("write", lambda *_: self._on_arch())
@@ -466,8 +488,8 @@ class LabApp(tk.Tk):
         return self.mode.get() == "Study 실행"
 
     def picked_archs(self):
-        """체크된 모델을 ARCHS 표시 순서대로 반환 (= 실행 순서)."""
-        return [a for a in ARCHS if self.study_pick[a].get()]
+        """체크된 모델을 STUDY_ARCHS 표시 순서대로 반환 (= 실행 순서)."""
+        return [a for a in STUDY_ARCHS if self.study_pick[a].get()]
 
     def _estimate(self):
         try:
@@ -539,10 +561,13 @@ class LabApp(tk.Tk):
         Study 모드에서는 결론 저장이 없으므로 결론 입력칸도 함께 숨기고,
         그만큼 로그 영역이 넓어진다.
         """
-        for btn in (self.study_md_btn, self.report_btn, self.concl_btn):
+        for btn in (self.study_md_btn, self.study_dir_btn,
+                    self.report_btn, self.concl_btn):
             btn.pack_forget()
         if study:
+            # 먼저 pack 한 쪽이 더 오른쪽 → 'Study 폴더 열기' 가 왼쪽에 온다
             self.study_md_btn.pack(side="right")
+            self.study_dir_btn.pack(side="right", padx=(0, 6))
             self.concl_text.pack_forget()
             self.concl_label.config(text="Study 결과 (결론은 STUDY.md 에 작성)")
         else:
@@ -639,6 +664,11 @@ class LabApp(tk.Tk):
         d.pack(fill="x", pady=4)
         self._seg(d, self.v["dataset"],
                   ["index_csv", "multilabel_fake", "cifar10", "fake"], "데이터셋")
+        # 학습 전 분포 점검 — figures/data_distribution.png 는 run 이 끝나야 생기므로
+        # 학습 전에는 index.csv 를 직접 읽어 보여준다.
+        self.dist_btn = ttk.Button(d, text="분포 보기 (학습 전 점검)",
+                                   command=self._show_distribution)
+        self.dist_btn.pack(fill="x", pady=(6, 0))
         self._slider(d, "사용 샘플 수", self.v["subset"], 0, 20000, 500,
                      lambda x: "전체" if x == 0 else f"{int(x):,}장")
         self._slider(d, "검증 비율", self.v["val_ratio"], 0.1, 0.5, 0.05,
@@ -753,6 +783,8 @@ class LabApp(tk.Tk):
         ttk.Label(nrow, text="Study 이름", width=11).pack(side="left")
         ttk.Entry(nrow, textvariable=self.study_name).pack(
             side="left", fill="x", expand=True)
+        ttk.Label(f, text="번호는 자동입니다. 주제를 붙여도 됩니다 — 예: study_02_lr",
+                  style="Hint.TLabel", wraplength=320).pack(anchor="w", pady=(2, 0))
         ttk.Label(f, text="같은 이름으로 다시 실행하면 완료된 모델은 건너뜁니다.",
                   style="Hint.TLabel", wraplength=320).pack(anchor="w", pady=(2, 0))
 
@@ -764,14 +796,14 @@ class LabApp(tk.Tk):
         grid = ttk.Frame(f)
         grid.pack(fill="x", pady=(2, 0))
         self.study_checks = {}
-        for i, arch in enumerate(ARCHS):
+        for i, arch in enumerate(STUDY_ARCHS):
             cb = ttk.Checkbutton(grid, text=arch, variable=self.study_pick[arch])
             cb.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 6))
             self.study_checks[arch] = cb
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
-        ttk.Label(f, text="simple_cnn 은 하네스 검증용 fixture 입니다 "
-                          "(실험 대상 아님).",
+        ttk.Label(f, text="simple_cnn 은 하네스 검증용 fixture 이므로 비교 대상에서 "
+                          "제외됩니다. 단일 실행에서는 선택할 수 있습니다.",
                   style="Hint.TLabel", wraplength=320).pack(anchor="w", pady=(2, 0))
 
         self.lrsearch_check = ttk.Checkbutton(
@@ -787,8 +819,41 @@ class LabApp(tk.Tk):
         self.queue_box.pack(fill="x", pady=(2, 0))
         self.queue_labels = {}
         self._rebuild_queue([])
-        ttk.Button(f, text="Study 폴더 열기", command=self._open_study_dir).pack(
-            fill="x", pady=(6, 0))
+
+    def _show_distribution(self):
+        """① 데이터 › 분포 보기 — index.csv 를 읽어 학습 전 점검 창을 띄운다.
+
+        학습 결과에 의존하지 않으므로 실행 중에도 열 수 있다.
+        """
+        if self.v["dataset"].get() != "index_csv":
+            messagebox.showinfo(
+                "분포 보기",
+                "실제 데이터(index_csv) 에만 해당합니다.\n"
+                "데이터셋을 index_csv 로 바꾼 뒤 다시 눌러 주세요.")
+            return
+        try:
+            text = format_summary(summarize_index(self.v["index_csv"].get()))
+        except ValueError as e:                                    # noqa: BLE001
+            messagebox.showinfo("분포 보기", str(e))
+            return
+        except Exception as e:                                     # noqa: BLE001
+            messagebox.showinfo("분포 보기", f"읽지 못했습니다 — {e}")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("데이터 분포 — 학습 전 점검")
+        win.transient(self)
+        box = ttk.Frame(win, padding=10)
+        box.pack(fill="both", expand=True)
+        txt = tk.Text(box, width=64, height=26, font=("Consolas", 10),
+                      wrap="none", borderwidth=0)
+        scroll = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", text)
+        txt.configure(state="disabled")     # 읽기 전용 — 값 수정 창이 아니다
+        ttk.Button(win, text="닫기", command=win.destroy).pack(pady=(0, 10))
 
     def _rebuild_queue(self, archs):
         for w in self.queue_box.winfo_children():
@@ -893,6 +958,8 @@ class LabApp(tk.Tk):
         # Study 모드 전용 — 단일 모드에서는 숨긴다 (_sync_result_buttons)
         self.study_md_btn = ttk.Button(cf, text="STUDY.md 열기",
                                        command=self._open_study_md)
+        self.study_dir_btn = ttk.Button(cf, text="Study 폴더 열기",
+                                        command=self._open_study_dir)
         self.report_btn = ttk.Button(cf, text="report.md 열기", command=self._open_report)
         self.concl_btn = ttk.Button(cf, text="결론 저장", command=self._save_conclusion)
         self.concl_text = tk.Text(p, height=3, font=(self.font, 9), wrap="word")
@@ -1090,7 +1157,7 @@ class LabApp(tk.Tk):
             self.v[key].set(val)
         # 실행 모드와 Study 설정도 '편집 중인 설정'이다
         self.mode.set(DEFAULT_MODE)
-        self.study_name.set(DEFAULT_STUDY_NAME)
+        self.study_name.set(default_study_name())
         self.study_lr_search.set(False)
         for var in self.study_pick.values():
             var.set(False)
@@ -1199,6 +1266,10 @@ class LabApp(tk.Tk):
         self.study_current = None
         self.study_started = time.time()
         self.study_state = {a: ("done" if a in done else "pending") for a in archs}
+        # 재개 시작 — 이전 실행에서 만든 리포트 기록은 버린다. 건너뛴 멤버도
+        # 리포트가 없을 수 있으므로 (B) 가 파일을 보고 다시 판단하게 둔다.
+        self.member_reported = set()
+        self.member_q = queue.Queue()
         self._rebuild_queue(archs)
         for a in archs:
             self._set_member_state(a, self.study_state[a])
@@ -1297,6 +1368,9 @@ class LabApp(tk.Tk):
             self._log(f"[모델 완료] {arch} · {member.name}")
         except Exception as e:                                 # noqa: BLE001
             self._log(f"  [경고] {arch} 결과 로드 실패: {e}")
+        # (A) 다음 모델이 도는 동안 이 모델의 그림·report.md 를 만들어 둔다.
+        # 화면 로드에 실패해도 리포트는 만든다 — 파일은 이미 완성돼 있다.
+        self._member_postprocess(arch, member)
 
     def _study_progress_label(self):
         finished = sum(1 for s in self.study_state.values()
@@ -1343,6 +1417,8 @@ class LabApp(tk.Tk):
                         self._finish_study_log()
                     elif "__single_done__" in item:
                         self._finish_single_log()
+                    elif "__members_done__" in item:
+                        self._after_member_reports()
                     # "__loaded__" 등 기타 신호는 무시 (이미 처리됨)
                     continue
                 line = item.strip()
@@ -1525,8 +1601,17 @@ class LabApp(tk.Tk):
                 self._log(f"  [경고] 결과 로드 실패: {e}")
         self._refresh_runs()
         self.proc = None
-        # 비교 그림까지 끝난 뒤에 최종 완료 줄을 찍고 로그 파일을 닫는다.
-        # (여기서 log_fp 를 먼저 닫으면 요약이 파일에 남지 않는다)
+        # 순서: (B) 멤버 리포트 보충 → 비교 그림 → 최종 완료 줄 → 로그 파일 닫기.
+        # (여기서 log_fp 를 먼저 닫으면 요약이 파일에 남지 않는다 — D-2)
+        if n_done:
+            self._finish_member_reports(study_dir)   # 끝나면 __members_done__
+        else:
+            self._after_member_reports()
+
+    def _after_member_reports(self):
+        """멤버 리포트가 끝난 뒤 — 비교 그림으로 넘어간다."""
+        study_dir = self.study_dir
+        n_done = len(collect_study_members(study_dir)) if study_dir else 0
         if n_done >= 2:
             self._make_study_figures(study_dir)
         else:
@@ -1549,6 +1634,16 @@ class LabApp(tk.Tk):
         if study_dir and (study_dir / "STUDY.md").exists():
             self._log("  STUDY.md · figures/loss_overlay.png 확인 가능 "
                       "(우측 'STUDY.md 열기' / 'Study 폴더 열기')")
+        if self.member_reported:
+            self._log(f"  모델별 report.md · figures/ {len(self.member_reported)}개 "
+                      f"— 멤버 폴더 안에 있습니다")
+        # 다음 Study 이름을 미리 채운다. 단, 사용자가 이름을 직접 고쳐 뒀다면
+        # 그 값을 존중한다 (같은 이름 재입력 = 재개라는 규칙을 깨지 않는다).
+        if study_dir and self.study_name.get().strip() == study_dir.name:
+            nxt = default_study_name()
+            self.study_name.set(nxt)
+            self._log(f"  다음 Study 이름: {nxt} "
+                      f"(같은 이름 '{study_dir.name}' 을 다시 넣으면 이어서 실행)")
         self._log("─" * 60)
         if self.log_fp:
             self.log_fp.close(); self.log_fp = None
@@ -1579,25 +1674,100 @@ class LabApp(tk.Tk):
         self._log("[비교 그림] 생성 중…")
         threading.Thread(target=worker, daemon=True).start()
 
-    def _post_process(self, run):
-        """학습과 분리된 별도 프로세스로 그림·리포트 생성 (실패해도 결과 보존)."""
+    def _run_postprocess(self, run, suffix="", catalog=True):
+        """그림·리포트를 별도 프로세스로 생성 (실패해도 학습 결과는 보존).
+
+        호출한 스레드에서 **동기로** 돈다. 단일 실행은 _post_process 가,
+        Study 는 _member_worker 가 각자 스레드에서 부른다.
+
+        suffix : 로그 접두어 뒤에 붙일 표시 — Study 는 모델이 섞이므로 필요하다
+        catalog: False 면 make_report 가 index.csv 를 갱신하지 않는다
+                 (Study 멤버는 마지막에 study 폴더 단위로 한 번만 갱신한다)
+        """
+        for script, label in ((FIGURES, "그림"), (REPORT, "리포트")):
+            tag = f"{label}{suffix}"
+            try:
+                cmd = [PYTHON, str(script), "--run", str(run)]
+                if script is REPORT and not catalog:
+                    cmd.append("--no-catalog")
+                env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   encoding="utf-8", env=env)
+                lines = (r.stdout or "").strip().splitlines()
+                tail = lines[-1].strip() if lines else "완료"
+                # 스크립트가 이미 '[그림] …' 처럼 태그를 붙여 나오면 중복 제거
+                if tail.startswith(f"[{label}]"):
+                    tail = tail[len(label) + 2:].strip()
+                if r.returncode != 0:
+                    tail = f"실패(무시): {(r.stderr or tail).strip()[-200:]}"
+                self.q.put(json.dumps({"event": "log",
+                                       "message": f"[{tag}] {tail}"}))
+            except Exception as e:                             # noqa: BLE001
+                self.q.put(json.dumps({"event": "log",
+                                       "message": f"[{tag}] 실패(무시): {e}"}))
+
+    # ------------------------------------------------- Study 멤버 후처리 (A·B)
+    def _member_postprocess(self, arch, run):
+        """멤버 하나를 후처리 큐에 넣는다 (모델 완료 시점 = A).
+
+        큐 + 워커 스레드 1개로 **직렬화**한다. 다음 모델 학습이 이미 GPU 를 쓰는
+        중이라 그림 생성이 겹치면 메모리만 축낸다. 순서도 완료 순으로 남는다.
+        """
+        if arch in self.member_reported:
+            return
+        self.member_reported.add(arch)
+        self.member_q.put((arch, run))
+        if self.member_thread is None or not self.member_thread.is_alive():
+            self.member_thread = threading.Thread(target=self._member_worker,
+                                                  daemon=True)
+            self.member_thread.start()
+
+    def _member_worker(self):
+        while True:
+            try:
+                arch, run = self.member_q.get_nowait()
+            except queue.Empty:
+                return
+            # 멤버 카탈로그는 study 폴더 단위로 마지막에 한 번만 갱신한다
+            self._run_postprocess(run, suffix=f"·{arch}", catalog=False)
+
+    def _finish_member_reports(self, study_dir):
+        """Study 종료 후처리 (= B) — A 가 놓친 멤버를 채우고 카탈로그를 갱신한다.
+
+        재개로 건너뛴 멤버는 '[모델 완료]' 로그가 나오지 않아 A 에 걸리지 않는다.
+        여기서 파일을 직접 보고 보충한다. 끝나면 비교 그림 단계로 넘어간다.
+        """
+        pending = members_needing_report(study_dir, self.member_reported)
+
         def worker():
-            for script, label in ((FIGURES, "그림"), (REPORT, "리포트")):
-                try:
-                    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-                    r = subprocess.run(
-                        [PYTHON, str(script), "--run", str(run)],
-                        capture_output=True, text=True, encoding="utf-8", env=env)
-                    lines = (r.stdout or "").strip().splitlines()
-                    tail = lines[-1].strip() if lines else "완료"
-                    # 스크립트가 이미 '[그림] …' 처럼 태그를 붙여 나오면 중복 제거
-                    if tail.startswith(f"[{label}]"):
-                        tail = tail[len(label) + 2:].strip()
-                    self.q.put(json.dumps({"event": "log",
-                                           "message": f"[{label}] {tail}"}))
-                except Exception as e:                         # noqa: BLE001
-                    self.q.put(json.dumps({"event": "log",
-                                           "message": f"[{label}] 실패(무시): {e}"}))
+            # A 로 이미 큐에 들어간 것들이 끝날 때까지 기다린다 (동시 실행 방지)
+            t = self.member_thread
+            if t is not None and t.is_alive():
+                t.join()
+            for arch, run in pending:
+                self.member_reported.add(arch)
+                self._run_postprocess(run, suffix=f"·{arch}", catalog=False)
+            try:
+                cat = update_catalog(study_dir)
+                if cat:
+                    self.q.put(json.dumps({"event": "log", "message":
+                                           f"[카탈로그] {cat} 갱신"}))
+            except Exception as e:                             # noqa: BLE001
+                self.q.put(json.dumps({"event": "log", "message":
+                                       f"[카탈로그] 실패(무시): {e}"}))
+            self.q.put({"__members_done__": True})
+
+        n = len(pending)
+        total = len(self.member_reported) + n
+        if total:
+            self._log(f"[멤버 리포트] {total}개 모델 · 그림·report.md 생성 중…"
+                      + (f" (남은 {n}개)" if n else ""))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _post_process(self, run):
+        """단일 실행 종료 후처리."""
+        def worker():
+            self._run_postprocess(run)
             self.q.put({"__single_done__": True})
         threading.Thread(target=worker, daemon=True).start()
         # 즉시 metrics 로드 (그림·리포트를 기다리지 않는다)
