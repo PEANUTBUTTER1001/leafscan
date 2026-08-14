@@ -3,7 +3,7 @@
 `data/` 는 `.gitignore` 대상이라 저장소를 새로 clone하면 아예 존재하지 않는다.
 **다른 무엇보다 먼저 이 스크립트를 실행해** 작물별 표준 폴더 구조를 만든다.
 그 다음 각자 AI 허브에서 받은 tar 를 정해진 위치에 넣기만 하면 된다
-(04_팀_협업_규약.md §4 — 원본 데이터는 공유·재배포하지 않고 각자 직접 받는다).
+(03_팀_협업_규약.md §4 — 원본 데이터는 공유·재배포하지 않고 각자 직접 받는다).
 
     python scripts/setup_data_dirs.py
     python scripts/setup_data_dirs.py --data-root D:/leafscan_data   # 디스크 분리 시

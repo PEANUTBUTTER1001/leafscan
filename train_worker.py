@@ -57,6 +57,39 @@ def log(msg):
     emit(event="log", message=msg)
 
 
+class ProgressEmitter:
+    """진행 이벤트 스로틀러 — 기본 1초에 한 번. 처음·마지막은 항상 낸다.
+
+    학습 로직은 건드리지 않고 '지금 어디까지 왔는지'만 알린다.
+    긴 무출력 구간(라벨 수집·epoch 내부·예측 수집)에서 GUI 가 멈춘 것처럼
+    보이던 문제를 없애기 위한 것이다.
+
+    clock·sink 를 주입할 수 있어 테스트에서 결정론적으로 검증한다.
+    """
+
+    def __init__(self, interval=1.0, clock=None, sink=None):
+        self.interval = interval
+        self.clock = clock or time.monotonic
+        self.sink = sink or emit
+        self._last = None
+
+    def phase(self, name):
+        """총량을 모르는 단계의 시작. 스로틀을 초기화한다."""
+        self._last = None
+        self.sink(event="phase", name=name)
+
+    def step(self, name, done, total=0, **extra):
+        """진행 1틱. 실제로 보냈으면 True."""
+        now = self.clock()
+        if self._last is not None:
+            if not (total and done >= total):
+                if (now - self._last) < self.interval:
+                    return False
+        self._last = now
+        self.sink(event="progress", phase=name, done=done, total=total, **extra)
+        return True
+
+
 def write_status(out_dir, **fields):
     fields.setdefault("pid", os.getpid())
     (Path(out_dir) / "status.json").write_text(
@@ -116,7 +149,8 @@ def _labels_to_device(labels, device):
 # 학습 / 검증 루프 (head 개수 무관)
 # --------------------------------------------------------------------------
 def run_epoch(model, loader, criteria, head_weights, device,
-              optimizer=None, scaler=None):
+              optimizer=None, scaler=None,
+              prog=None, phase="", frac_base=0.0, frac_span=0.0):
     train_mode = optimizer is not None
     model.train() if train_mode else model.eval()
     amp_on = scaler is not None and scaler.is_enabled()
@@ -131,8 +165,9 @@ def run_epoch(model, loader, criteria, head_weights, device,
             loss = loss + head_weights[h] * criteria[h](logit, labels[h])
         return outs, loss
 
+    n_steps = len(loader)
     with ctx:
-        for images, labels in loader:
+        for step, (images, labels) in enumerate(loader, 1):
             images = images.to(device)
             labels = _labels_to_device(labels, device)
             if train_mode and amp_on:
@@ -158,6 +193,10 @@ def run_epoch(model, loader, criteria, head_weights, device,
             total += bs
             for h, logit in outs.items():
                 correct[h] += (logit.argmax(1) == labels[h]).sum().item()
+            if prog is not None and n_steps:
+                extra = ({"epoch_frac": frac_base + frac_span * step / n_steps}
+                         if frac_span else {})
+                prog.step(phase, step, n_steps, **extra)
 
     n_heads = max(1, len(correct))
     mean_acc = sum(correct[h] / max(total, 1) for h in correct) / n_heads
@@ -166,12 +205,15 @@ def run_epoch(model, loader, criteria, head_weights, device,
 
 
 @torch.no_grad()
-def collect_predictions(model, loader, device):
+def collect_predictions(model, loader, device, prog=None):
     """head 별 logits/labels numpy dict 반환."""
     model.eval()
     logits = {}
     labels_acc = {}
-    for images, labels in loader:
+    n_steps = len(loader)
+    for step, (images, labels) in enumerate(loader, 1):
+        if prog is not None and n_steps:
+            prog.step("검증 예측 수집", step, n_steps)
         outs = _as_out_dict(model(images.to(device)))
         labels = labels if isinstance(labels, dict) else {"label": labels}
         for h, logit in outs.items():
@@ -220,14 +262,21 @@ def setup_data_and_model(cfg, device):
     return train_ds, val_ds, model, heads, label_names, {"test_ds": val_ds}
 
 
-def _collect_train_labels(loader, heads):
-    """auto class weight 계산용 head 별 라벨 수집."""
+def _collect_train_labels(loader, heads, prog=None):
+    """auto class weight 계산용 head 별 라벨 수집.
+
+    라벨만 쓰지만 로더가 이미지까지 전부 디코딩·변환하므로 시간이 오래 걸린다.
+    학습 시작 전인데 아무 출력이 없어 멈춘 것처럼 보이던 구간이라 진행률을 낸다.
+    """
     acc = {h: [] for h in heads}
-    for _images, labels in loader:
+    n_steps = len(loader)
+    for step, (_images, labels) in enumerate(loader, 1):
         labels = labels if isinstance(labels, dict) else {"label": labels}
         for h in heads:
             v = labels[h]
             acc[h].extend(v.tolist() if torch.is_tensor(v) else list(v))
+        if prog is not None and n_steps:
+            prog.step("학습 라벨 수집 (class weight)", step, n_steps)
     return acc
 
 
@@ -296,9 +345,14 @@ def main():
 
     _vram_warn(cfg, device)
 
+    prog = ProgressEmitter(interval=float(cfg.get("progress_interval", 1.0)))
+
     # 손실: head 별 criterion + head 가중치
-    train_labels = ({} if cfg.get("class_weight", "none") == "none"
-                    else _collect_train_labels(train_loader, heads))
+    if cfg.get("class_weight", "none") == "none":
+        train_labels = {}
+    else:
+        prog.phase("학습 라벨 수집 (class weight)")
+        train_labels = _collect_train_labels(train_loader, heads, prog)
     criteria = build_criteria(heads, cfg, train_labels, device)
     head_weights = resolve_head_weights(heads, cfg)
     if len(heads) > 1:
@@ -350,10 +404,26 @@ def main():
                  trainable_params=n_train, lr=lr_finetune)
             stage_events.append({"name": "freeze_release", "epoch": e,
                                  "trainable_params": n_train})
-        tr_loss, tr_acc, tr_ph = run_epoch(model, train_loader, criteria,
-                                           head_weights, device, optimizer, scaler)
-        va_loss, va_acc, va_ph = run_epoch(model, val_loader, criteria,
-                                           head_weights, device)
+        # 진행바는 epoch 하나를 학습 절반 · 검증 절반으로 나눠 채운다
+        tr_loss, tr_acc, tr_ph = run_epoch(
+            model, train_loader, criteria, head_weights, device, optimizer, scaler,
+            prog=prog, phase=f"epoch {e} 학습", frac_base=e - 1, frac_span=0.5)
+        va_loss, va_acc, va_ph = run_epoch(
+            model, val_loader, criteria, head_weights, device,
+            prog=prog, phase=f"epoch {e} 검증", frac_base=e - 0.5, frac_span=0.5)
+
+        # 발산 감지 — NaN/inf 는 이후 epoch 에서 회복되지 않는다.
+        # 남은 epoch 을 헛돌지 않게 끊고, metrics.json 을 남기지 않아
+        # run_study 가 '완료' 로 집계하지 못하게 한다 (가짜 지표 차단).
+        if not (math.isfinite(tr_loss) and math.isfinite(va_loss)):
+            raise RuntimeError(
+                f"학습이 발산했습니다 — epoch {e} 에서 loss={tr_loss}, "
+                f"val_loss={va_loss} (NaN/inf). 이후 epoch 에서 회복되지 않으므로 "
+                f"중단합니다. AMP 를 끄거나(고급 › AMP 사용 해제) lr 을 낮춰 "
+                f"다시 시도하세요. "
+                f"[arch={cfg.get('arch')} · lr={lr} · batch_size={cfg.get('batch_size')} "
+                f"· amp={amp_enabled} · device={device}]")
+
         rec = dict(epoch=e, loss=tr_loss, acc=tr_acc,
                    val_loss=va_loss, val_acc=va_acc)
         if len(heads) > 1:   # 골든(단일 head)에는 추가 키를 넣지 않는다
@@ -380,10 +450,13 @@ def main():
             break
 
     if (out / "best.pt").exists():
+        prog.phase("최적 가중치 로드")
         model.load_state_dict(torch.load(out / "best.pt", map_location=device))
-    logits, labels = collect_predictions(model, val_loader, device)
+    prog.phase("검증 예측 수집")
+    logits, labels = collect_predictions(model, val_loader, device, prog)
 
     # head 별 저장 + 단일 head 하위호환(logits.npy/labels.npy)
+    prog.phase("예측 결과 저장")
     for h in logits:
         np.save(out / f"logits_{h}.npy", logits[h])
         np.save(out / f"labels_{h}.npy", labels[h])
@@ -393,6 +466,7 @@ def main():
         np.save(out / "labels.npy", labels[only])
 
     # P6 지표
+    prog.phase("지표 계산")
     per_head_metrics = compute_metrics(logits, labels, label_names)
 
     final = history[-1] if history else {}
@@ -418,6 +492,7 @@ def main():
     if extra.get("split") is not None:
         metrics["split"] = extra["split"]
         metrics["split_report"] = extra["split_report"]
+    prog.phase("metrics.json 저장")
     (out / "metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     tracker.end()
