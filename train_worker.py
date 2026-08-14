@@ -19,8 +19,10 @@ GUI 없이 터미널에서 단독 실행해도 완전히 동일하게 동작한�
 
 import argparse
 import json
+import math
 import os
 import random
+import re
 import sys
 import time
 import traceback
@@ -59,6 +61,21 @@ def write_status(out_dir, **fields):
     fields.setdefault("pid", os.getpid())
     (Path(out_dir) / "status.json").write_text(
         json.dumps(fields, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _fp16_broken_gpu():
+    """fp16 연산 결함(NaN)이 알려진 GPU 이면 이름을 반환, 아니면 None.
+
+    GTX 16xx(Turing, 텐서코어 없음)는 특정 conv 형태에서 cuDNN fp16 커널이
+    NaN 을 내는 결함이 널리 보고되어 있다 (실측: GTX 1650 + resnet18 32px 의
+    layer3.0.downsample 1x1 conv 출력 24.5% NaN → 가중치 전체 오염).
+    텐서코어가 없어 AMP 속도 이득도 거의 없으므로 끄는 것이 안전하다.
+    """
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:  # noqa: BLE001
+        return None
+    return name if re.search(r"GTX 16\d0", name) else None
 
 
 def _vram_warn(cfg, device):
@@ -132,7 +149,12 @@ def run_epoch(model, loader, criteria, head_weights, device,
                     loss.backward()
                     optimizer.step()
             bs = images.size(0)
-            total_loss += loss.item() * bs
+            batch_loss = loss.item()
+            if not math.isfinite(batch_loss):
+                raise RuntimeError(
+                    f"손실이 NaN/Inf 입니다 (batch loss={batch_loss}) — 즉시 중단. "
+                    f"lr 과대, AMP fp16 결함, 데이터 이상 여부를 확인하세요")
+            total_loss += batch_loss * bs
             total += bs
             for h, logit in outs.items():
                 correct[h] += (logit.argmax(1) == labels[h]).sum().item()
@@ -246,11 +268,23 @@ def main():
          arch=cfg.get("arch", "simple_cnn"), heads=heads,
          torch_version=torch.__version__, torchvision_version=torchvision.__version__)
 
-    nw = int(cfg.get("num_workers", 0))
+    nw = cfg.get("num_workers", 0)
+    if nw in (None, "auto"):
+        # JPEG 디코딩이 병목인 실이미지 데이터셋에서만 병렬 로딩 기본 적용.
+        # Windows 의 worker spawn(프로세스 생성+torch import)이 수십 초라,
+        # 작은 데이터(빠른확인 등)에서는 병렬화가 오히려 크게 느리다 (실측:
+        # 500장 12초 → 150초). 충분히 커서 상쇄될 때만 켠다.
+        big_enough = cfg["dataset"] == "index_csv" and len(train_ds) >= 3000
+        nw = min(6, max(2, (os.cpu_count() or 4) - 2)) if big_enough else 0
+    nw = int(nw)
+    dl_kw = dict(num_workers=nw, pin_memory=(device == "cuda"),
+                 persistent_workers=(nw > 0 and int(cfg["epochs"]) > 1))
     train_loader = DataLoader(train_ds, batch_size=int(cfg["batch_size"]),
-                              shuffle=True, num_workers=nw)
+                              shuffle=True, **dl_kw)
     val_loader = DataLoader(val_ds, batch_size=int(cfg["batch_size"]),
-                            shuffle=False, num_workers=nw)
+                            shuffle=False, **dl_kw)
+    if nw:
+        log(f"DataLoader 병렬 로딩 num_workers={nw}")
     log(f"train {len(train_ds)}장 / val {len(val_ds)}장 · device={device} · heads={heads}")
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -285,6 +319,11 @@ def main():
     optimizer = build_optimizer(cfg, model, lr)
 
     amp_enabled = bool(cfg.get("amp", True)) and device == "cuda"
+    broken_gpu = _fp16_broken_gpu() if amp_enabled else None
+    if broken_gpu:
+        amp_enabled = False
+        log(f"AMP 자동 비활성 — {broken_gpu} 는 fp16 결함(NaN)이 알려진 "
+            f"GPU 입니다 (GTX 16xx). fp32 로 학습합니다.")
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if amp_enabled:
         log("AMP(autocast + GradScaler) 활성")

@@ -10,7 +10,14 @@
   · crops_id 는 JSON 필드 사용 (파일명 파싱 금지 — 길이가 일정하지 않음)
   · width/height 는 문자열 → int 변환
   · 한 아카이브에 한 단계만 있을 수 있음, 개체 단위 시계열
-  · labeled/source 짝의 stem 교집합이 0 이면 데이터가 깨진 것 (재다운로드 필요)
+  · (작물, split) 전체의 labeled↔source stem 교집합이 0 이면 데이터가 깨진 것
+
+짝 검증 전역화 (판단 D-02): 같은 번호의 TL/TS tar 가 같은 내용물을 담는다는
+  보장이 없다. 실측(겨자채 training)으로 TL_1.겨자채1 의 stem 들이
+  TS_1.겨자채60/61 에 들어 있는 등, 라벨과 원본이 서로 다른 순서로 묶여
+  배포된다. 따라서 번호별 1:1 짝 검증 대신 (작물, split) 단위로 모든 tar 의
+  stem 을 모아 전역 조인한다. 라벨 없는 이미지는 경고 후 제외(labeled tar
+  누락분), 이미지 없는 라벨은 hard 오류(--skip-broken 시 매칭분만 진행).
 
 group_id 견고화 (판단 D-01): 실제 TL_42 는 stem 이 JSON crops_id 로 시작하지
   않는다(stem=C26_L01_07_..., crops_id=C26_L04_01). 이 경우에도 개체 단위 누수를
@@ -31,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tasks.leafscan import (CANON_CROPS, CANON_STAGES, FOLDER_TO_CROP,
                             order_present)
 
-ARCHIVE_RE = re.compile(r"^(TL|TS|VL|VS)_3\.(.+?)(\d+)\.tar$")
+ARCHIVE_RE = re.compile(r"^(TL|TS|VL|VS)_[1234]\.(.+?)(\d+)\.tar$")
 ROLE = {"TL": ("training", "labeled"), "TS": ("training", "source"),
         "VL": ("validation", "labeled"), "VS": ("validation", "source")}
 INDEX_COLUMNS = ["path", "crop", "stage", "group_id", "archive", "split_source",
@@ -80,46 +87,62 @@ def _tar_stems(tar_path: Path, ext: str):
         return {Path(n).name[:-len(ext)] for n in t.getnames() if n.endswith(ext)}
 
 
-def validate_pairs(archives):
-    """(pairs, errors) 반환. pairs: 짝이 맞고 교집합이 충분한 (labeled, source, stems).
+def match_archives(archives):
+    """(groups, errors) 반환. 전역 stem 조인 (판단 D-02).
 
-    number 미스매치·짝 없음·교집합 0/저조를 errors 로 수집한다.
+    같은 번호의 TL/TS tar 가 같은 내용물을 담는다는 보장이 없으므로,
+    (작물, split) 단위로 모든 labeled tar 의 json stem 과 모든 source tar 의
+    jpg stem 을 모아 전역으로 조인한다.
+
+    groups 원소: dict(crop, split, labs, srcs, lab_map, src_map, stems)
+      · lab_map/src_map: stem -> Archive (어느 tar 에 들어 있는지)
+      · stems: 조인된(라벨·이미지 모두 있는) stem 집합
     """
-    grouped = defaultdict(dict)   # (crop, split, number) -> {role: Archive}
+    grouped = defaultdict(lambda: {"labeled": [], "source": []})
     for a in archives:
-        grouped[(a.crop_folder, a.split, a.number)][a.role] = a
+        grouped[(a.crop_folder, a.split)][a.role].append(a)
 
-    pairs, errors = [], []
-    for (crop, split, number), roles in sorted(grouped.items()):
-        lab, src = roles.get("labeled"), roles.get("source")
-        if lab and not src:
+    groups, errors = [], []
+    for (crop, split), roles in sorted(grouped.items()):
+        labs, srcs = roles["labeled"], roles["source"]
+        if labs and not srcs:
             errors.append(dict(kind="missing_source", crop=crop, split=split,
-                               number=number, detail=f"labeled {lab.stem} 의 source 짝 없음"))
+                               detail=f"labeled tar {len(labs)}개에 대응하는 source tar 없음"))
             continue
-        if src and not lab:
+        if srcs and not labs:
             errors.append(dict(kind="missing_labeled", crop=crop, split=split,
-                               number=number, detail=f"source {src.stem} 의 labeled 짝 없음"))
+                               detail=f"source tar {len(srcs)}개에 대응하는 labeled tar 없음"))
             continue
-        # 짝은 있음 — stem 교집합 검사
-        lab_stems = _tar_stems(lab.path, ".json")
-        src_stems = _tar_stems(src.path, ".jpg")
-        inter = lab_stems & src_stems
-        ratio = len(inter) / max(1, min(len(lab_stems), len(src_stems)))
-        if len(inter) == 0:
+        lab_map, src_map = {}, {}   # stem -> Archive
+        for a in labs:
+            for s in _tar_stems(a.path, ".json"):
+                lab_map[s] = a
+        for a in srcs:
+            for s in _tar_stems(a.path, ".jpg"):
+                src_map[s] = a
+        matched = set(lab_map) & set(src_map)
+        n_no_image = len(lab_map) - len(matched)
+        n_unlabeled = len(src_map) - len(matched)
+        if not matched:
             errors.append(dict(kind="zero_intersection", crop=crop, split=split,
-                               number=number,
-                               detail=(f"{lab.stem}({len(lab_stems)}건) ↔ "
-                                       f"{src.stem}({len(src_stems)}건) 교집합 0건 "
-                                       f"— 짝이 실제로 맞지 않습니다. 올바른 번호의 tar 를 받으세요")))
+                               detail=(f"라벨 {len(lab_map)}건 ↔ 이미지 {len(src_map)}건 "
+                                       f"교집합 0건 — 라벨과 이미지가 전혀 매칭되지 "
+                                       f"않습니다. 데이터를 다시 받으세요")))
             continue
-        if ratio < 0.95:
-            errors.append(dict(kind="low_intersection", crop=crop, split=split,
-                               number=number, soft=True,
-                               detail=(f"{lab.stem} ↔ {src.stem} 교집합 {ratio*100:.1f}% "
-                                       f"({len(inter)}건) — 95% 미만")))
-        pairs.append(dict(crop=crop, split=split, number=number,
-                          labeled=lab, source=src, stems=inter))
-    return pairs, errors
+        if n_no_image:
+            errors.append(dict(kind="label_missing_image", crop=crop, split=split,
+                               detail=(f"이미지 없는 라벨 {n_no_image}건 — source tar "
+                                       f"누락 가능성. --skip-broken 으로 매칭된 "
+                                       f"{len(matched)}건만 진행 가능")))
+        if n_unlabeled:
+            errors.append(dict(kind="unlabeled_image", crop=crop, split=split, soft=True,
+                               detail=(f"라벨 없는 이미지 {n_unlabeled}건 제외 "
+                                       f"(labeled tar 누락분으로 추정)")))
+        log(f"[정보] {crop}/{split} — labeled tar {len(labs)}개(라벨 {len(lab_map)}건) "
+            f"↔ source tar {len(srcs)}개(이미지 {len(src_map)}건) → 매칭 {len(matched)}건")
+        groups.append(dict(crop=crop, split=split, labs=labs, srcs=srcs,
+                           lab_map=lab_map, src_map=src_map, stems=matched))
+    return groups, errors
 
 
 # --------------------------------------------------------------------------
@@ -199,36 +222,37 @@ def build_index(data_root: Path, out_csv: Path, skip_broken=False,
     if not archives:
         raise SystemExit(f"[중단] {data_root} 에서 아카이브(*.tar)를 찾지 못했습니다.")
 
-    pairs, errors = validate_pairs(archives)
+    groups, errors = match_archives(archives)
     hard = [e for e in errors if not e.get("soft")]
     for e in errors:
         tag = "[경고]" if e.get("soft") else "[!!]"
-        log(f"{tag} {e['crop']}/{e['split']} #{e['number']} — {e['detail']}")
+        log(f"{tag} {e['crop']}/{e['split']} — {e['detail']}")
 
     if hard and not skip_broken:
         log("")
-        log("[중단] 짝이 맞지 않는 아카이브가 있습니다. 위 항목을 해결하거나")
-        log("       --skip-broken 으로 해당 짝만 건너뛰고 진행하세요.")
+        log("[중단] 라벨↔이미지 매칭에 문제가 있습니다. 위 항목을 해결하거나")
+        log("       --skip-broken 으로 매칭된 것만으로 진행하세요.")
         raise SystemExit(2)
     if hard and skip_broken:
-        broken = {(e["crop"], e["split"], e["number"]) for e in hard}
-        pairs = [p for p in pairs if (p["crop"], p["split"], p["number"]) not in broken]
-        log(f"[진행] --skip-broken: 깨진 짝 {len(broken)}개를 제외하고 계속합니다.")
-    if not pairs:
-        raise SystemExit("[중단] 사용 가능한(짝이 맞는) 아카이브가 없습니다.")
+        log(f"[진행] --skip-broken: 이슈 {len(hard)}건을 무시하고 "
+            f"매칭된 stem 만으로 계속합니다.")
+    if not groups:
+        raise SystemExit("[중단] 사용 가능한(매칭되는) 아카이브가 없습니다.")
 
     rows = []
     excluded = Counter()
     manifest_rows = []
-    for pair in pairs:
-        crop_kr = FOLDER_TO_CROP[pair["crop"]]
+    for group in groups:
+        crop_kr = FOLDER_TO_CROP[group["crop"]]
         if crops_only and crop_kr not in crops_only:
             continue
-        lab_dir = extract_archive(pair["labeled"], extract_root)
-        src_dir = extract_archive(pair["source"], extract_root)
-        archive_name = pair["labeled"].stem
-        n_added = 0
-        for stem in sorted(pair["stems"]):
+        lab_dirs = {a.stem: extract_archive(a, extract_root) for a in group["labs"]}
+        src_dirs = {a.stem: extract_archive(a, extract_root) for a in group["srcs"]}
+        per_archive = Counter()   # labeled tar 별 건수 (MANIFEST 용)
+        for stem in sorted(group["stems"]):
+            archive_name = group["lab_map"][stem].stem
+            lab_dir = lab_dirs[archive_name]
+            src_dir = src_dirs[group["src_map"][stem].stem]
             jpath = lab_dir / f"{stem}.json"
             ipath = src_dir / f"{stem}.jpg"
             if not jpath.exists():
@@ -274,7 +298,7 @@ def build_index(data_root: Path, out_csv: Path, skip_broken=False,
                 "stage": info["stage"],
                 "group_id": gid,
                 "archive": archive_name,
-                "split_source": pair["split"],
+                "split_source": group["split"],
                 "kind_type": info["kind_type"],
                 "width": info["width"],
                 "height": info["height"],
@@ -283,8 +307,9 @@ def build_index(data_root: Path, out_csv: Path, skip_broken=False,
                 "bbox": info["bbox"],
                 "ambiguous": False,
             })
-            n_added += 1
-        manifest_rows.append((archive_name, pair["split"], n_added))
+            per_archive[archive_name] += 1
+        for name in sorted(per_archive):
+            manifest_rows.append((name, group["split"], per_archive[name]))
 
     if not rows:
         raise SystemExit("[중단] 조인 결과가 0건입니다. 짝·경로를 확인하세요.")
@@ -351,10 +376,10 @@ def write_manifest(path: Path, index_csv: Path, rows, manifest_rows, excluded, e
     lines += ["", "## 제외/경고 건수", ""]
     lines.append(f"- 제외: {dict(excluded) if excluded else '없음'}")
     if errors:
-        lines.append("- 짝 검증 이슈:")
+        lines.append("- 매칭 검증 이슈:")
         for e in errors:
             lines.append(f"  - [{'경고' if e.get('soft') else '오류'}] "
-                         f"{e['crop']}/{e['split']} #{e['number']}: {e['detail']}")
+                         f"{e['crop']}/{e['split']}: {e['detail']}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -48,7 +48,8 @@ def setup(data_root="data"):
                      f"← {prefix}_3.{crop_kr}NN.tar")
     print()
     print("지금은 data/lettuce/ 만 채워도 된다 — 나머지 3작물은 준비되는 대로 넣으면 된다.")
-    print("배치 후: python scripts/prepare_dataset.py --data-root data --out data/index.csv")
+    print("배치 후 (전처리 원스톱 — 검증·추출·index·이미지캐시):")
+    print("  python scripts/preprocess.py")
     return created
 
 

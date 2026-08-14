@@ -13,7 +13,7 @@
   "optimizer": "AdamW",
   "patience": 5,
   "seed": 42,
-  "num_workers": 0,
+  "num_workers": "auto",
   "device": "auto",
   "split_policy": "resplit_all",
   "crop_mode": "full",

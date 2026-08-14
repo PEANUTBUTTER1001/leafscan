@@ -782,7 +782,7 @@ class LabApp(tk.Tk):
                           "stage": float(self.v["w_stage"].get())},
             patience=int(self.v["patience"].get()),
             seed=int(self.v["seed"].get()),
-            num_workers=0,
+            num_workers="auto",   # index_csv 에서 병렬 로딩 (워커가 CPU 수로 결정)
             device="auto",
             hypothesis=self.hypo_text.get("1.0", "end").strip(),
             tags=[],
