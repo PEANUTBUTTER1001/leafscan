@@ -20,6 +20,12 @@ SIMPLE_CNN_KEYS = ("conv_channels", "kernel_size", "stride", "padding",
                    "pool_kernel", "pool_stride", "conv_blocks", "use_relu")
 
 
+def fmt_hms(sec):
+    """초 → 00:12:34. 음수는 0 으로 본다."""
+    sec = max(0, int(sec))
+    return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
 def study_arch_from_run_name(text):
     """'study__arch-resnet18__lr-0.001' → 'resnet18'. 없으면 None.
 

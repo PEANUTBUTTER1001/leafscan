@@ -40,7 +40,7 @@ except ImportError:                                            # noqa: BLE001
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.study_link import (build_study_base_config, collect_study_members,
-                             parse_study_line, study_config_diff,
+                             fmt_hms, parse_study_line, study_config_diff,
                              validate_study_name)
 
 BASE = Path(__file__).resolve().parent
@@ -117,10 +117,16 @@ DEFAULTS = {
     "w_stage":          (tk.DoubleVar,  0.6),
     "patience":         (tk.IntVar,     5),
     "seed":             (tk.IntVar,     42),
+    # AMP(혼합정밀) — CUDA 에서만 적용된다. 기본 켜짐(기존 동작).
+    # fp16 오버플로로 loss 가 NaN 이 되는 경우가 있어 끌 수 있게 노출한다.
+    "amp":              (tk.BooleanVar, True),
 }
 # Study 모드 기본값 (초기화 대상)
 DEFAULT_MODE = "단일 실행"
 DEFAULT_STUDY_NAME = "study_01_backbone"
+
+# 진행 표시 회전자 — 터미널·GUI 어디서도 깨지지 않는 ASCII
+SPINNER = "-\\|/"
 
 # 큐 상태 표기 — (기호, 문구, 색)
 STUDY_STATES = {
@@ -375,6 +381,12 @@ class LabApp(tk.Tk):
         self.study_current = None
         self.study_started = None    # 소요 시간 계산용
         self._study_result = None    # (상태, 폴더, 요약) — 최종 완료 줄에 쓴다
+        # 진행 표시 (로그 창의 마지막 줄을 덮어쓰는 라이브 줄)
+        self._live_on = False
+        self._spin = 0
+        self._phase_started = None
+        self.run_started = None
+        self._single_result = None   # (run, exit code) — 최종 완료 줄에 쓴다
         RUNS.mkdir(exist_ok=True)
         self._build_vars()
         self._build_ui()
@@ -700,6 +712,11 @@ class LabApp(tk.Tk):
         ttk.Label(srow, text="seed", width=13).pack(side="left")
         ttk.Spinbox(srow, from_=0, to=9999, width=6,
                     textvariable=self.v["seed"]).pack(side="left")
+        ttk.Checkbutton(adv_t, text="AMP 혼합정밀 사용 (GPU 전용)",
+                        variable=self.v["amp"]).pack(anchor="w", pady=(6, 0))
+        ttk.Label(adv_t, text="빠르지만 fp16 오버플로로 loss 가 NaN 이 되면 "
+                             "해제하고 다시 실행하세요. CPU 에서는 무시됩니다.",
+                  style="Hint.TLabel", wraplength=320).pack(anchor="w")
 
         # ④ 실행 — 가설 입력(실행 전 강제)
         r = ttk.Labelframe(p, text="④ 실행", padding=8)
@@ -931,12 +948,43 @@ class LabApp(tk.Tk):
                 cm.load_from_arrays(np.load(lg), np.load(lb), names)
 
     def _log(self, text):
+        """계속 남는 줄. 진행 중이던 라이브 줄은 지우고 찍는다."""
+        self._log_live_clear()
         self.log.configure(state="normal")
         self.log.insert("end", text.rstrip() + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
         if self.log_fp:
             self.log_fp.write(text.rstrip() + "\n"); self.log_fp.flush()
+
+    def _log_live(self, text):
+        """진행 표시 — 마지막 줄을 덮어쓴다.
+
+        로그 창이 무한정 길어지지 않게 하고, **파일에는 쓰지 않는다**
+        (train.log 가 진행률로 뒤덮이면 못 쓰게 된다).
+        """
+        self.log.configure(state="normal")
+        if self._live_on:
+            self.log.delete("live_start", "end-1c")
+        else:
+            self.log.mark_set("live_start", "end-1c")
+            self.log.mark_gravity("live_start", "left")
+            self._live_on = True
+        self.log.insert("end", text.rstrip() + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _log_live_clear(self):
+        if not self._live_on:
+            return
+        self.log.configure(state="normal")
+        self.log.delete("live_start", "end-1c")
+        self.log.configure(state="disabled")
+        self._live_on = False
+
+    def _spin_char(self):
+        self._spin = (self._spin + 1) % len(SPINNER)
+        return SPINNER[self._spin]
 
     # ----------------------------------------------------------- run 관리
     def _refresh_runs(self):
@@ -1009,6 +1057,7 @@ class LabApp(tk.Tk):
                           "stage": float(self.v["w_stage"].get())},
             patience=int(self.v["patience"].get()),
             seed=int(self.v["seed"].get()),
+            amp=bool(self.v["amp"].get()),
             num_workers=0,
             device="auto",
             hypothesis=self.hypo_text.get("1.0", "end").strip(),
@@ -1080,6 +1129,7 @@ class LabApp(tk.Tk):
         (run_dir / "config.json").write_text(
             json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         self.current_run = run_dir
+        self.run_started = time.time()
         self.log_fp = open(run_dir / "train.log", "w", encoding="utf-8")
         self.chart.reset(); self._reset_head_tabs()
         self.prog.config(value=0, maximum=cfg["epochs"])
@@ -1291,6 +1341,8 @@ class LabApp(tk.Tk):
                         self._on_exit(item["__exit__"])
                     elif "__study_done__" in item:
                         self._finish_study_log()
+                    elif "__single_done__" in item:
+                        self._finish_single_log()
                     # "__loaded__" 등 기타 신호는 무시 (이미 처리됨)
                     continue
                 line = item.strip()
@@ -1339,11 +1391,45 @@ class LabApp(tk.Tk):
                                      f"{self.study_current or '-'} · {pct}%")
             else:
                 self.status_text.set(f"학습 중 · {self.current_run.name} · {pct}%")
+        elif ev == "phase":
+            # 총량을 모르는 단계 — 살아 있다는 것만 보여준다
+            self._phase_started = time.time()
+            self._log_live(f"  {self._spin_char()} {msg.get('name','')} ...")
+        elif ev == "progress":
+            self._render_progress(msg)
         elif ev == "error":
             self._log("[실패] " + msg.get("message", "")
                       + f" (유형: {msg.get('kind','?')})")
             for l in msg.get("traceback", "").splitlines()[-10:]:
                 self._log("    " + l)
+
+    def _render_progress(self, msg):
+        """train_worker 의 progress 이벤트 → 라이브 줄 + 진행바."""
+        phase = msg.get("phase", "")
+        done, total = int(msg.get("done", 0)), int(msg.get("total", 0))
+        body = f"  {self._spin_char()} {phase}"
+        if total:
+            body += f" — {done:,} / {total:,} ({done / total * 100:.1f}%)"
+        else:
+            body += f" — {done:,}건"
+        if self._phase_started:
+            body += f" · 경과 {fmt_hms(time.time() - self._phase_started)}"
+        self._log_live(body)
+
+        # epoch 내부 비율까지 진행바에 반영 (학습 절반 · 검증 절반)
+        frac = msg.get("epoch_frac")
+        if frac is not None:
+            try:
+                self.prog.config(value=float(frac))
+                tot = float(self.prog["maximum"]) or 1.0
+                pct = int(min(1.0, float(frac) / tot) * 100)
+                if self.is_study:
+                    self.status_text.set(f"{self._study_progress_label()} · "
+                                         f"{self.study_current or '-'} · {pct}%")
+                elif self.current_run is not None:
+                    self.status_text.set(f"학습 중 · {self.current_run.name} · {pct}%")
+            except (tk.TclError, ValueError, ZeroDivisionError):
+                pass
 
     def _base_summary(self):
         return normalize_run_summary(self.baseline) if self.baseline else {}
@@ -1362,17 +1448,37 @@ class LabApp(tk.Tk):
         self.stop_btn.config(state="disabled")
         self.reset_btn.config(state="normal")
         run = self.current_run
-        if self.log_fp:
-            self.log_fp.close(); self.log_fp = None
+        self._log_live_clear()
         if run and (run / "metrics.json").exists():
-            self._log(f"[{run.name}] 학습 종료 (exit={code}) · 그림·리포트 생성 중…")
+            # 로그 파일은 후처리까지 끝난 뒤 최종 블록을 찍고 닫는다
+            self._single_result = (run, code)
+            self._log(f"[{run.name}] 그림·리포트 생성 중…")
             self._post_process(run)
         else:
             state = "중단됨" if code and code < 0 else "실패"
             self.status_text.set(f"{state} · {run.name if run else '-'}")
             self._log(f"[{state}] exit={code}")
+            if self.log_fp:
+                self.log_fp.close(); self.log_fp = None
         self._refresh_runs()
         self.proc = None
+
+    def _finish_single_log(self):
+        """단일 실행의 마지막 줄 — 후처리까지 끝났음을 한눈에 보이게 찍는다."""
+        run, code = getattr(self, "_single_result", (self.current_run, 0))
+        took = (f" · 소요 {fmt_hms(time.time() - self.run_started)}"
+                if self.run_started else "")
+        name = run.name if run is not None else "-"
+        self._log("─" * 60)
+        self._log(f"[{name} 완료] 그림·리포트 생성 완료 · 학습 종료 (exit={code}){took}")
+        if run is not None:
+            self._log(f"  결과: {run}")
+            if (run / "report.md").exists():
+                self._log("  report.md · figures/ 확인 가능 (우측 'report.md 열기')")
+        self._log("─" * 60)
+        if self.log_fp:
+            self.log_fp.close(); self.log_fp = None
+        self.run_started = None
 
     def _on_study_exit(self, code):
         """Study 종료 — 멤버 폴더를 실제로 스캔해 최종 상태를 확정한다."""
@@ -1482,14 +1588,17 @@ class LabApp(tk.Tk):
                     r = subprocess.run(
                         [PYTHON, str(script), "--run", str(run)],
                         capture_output=True, text=True, encoding="utf-8", env=env)
+                    lines = (r.stdout or "").strip().splitlines()
+                    tail = lines[-1].strip() if lines else "완료"
+                    # 스크립트가 이미 '[그림] …' 처럼 태그를 붙여 나오면 중복 제거
+                    if tail.startswith(f"[{label}]"):
+                        tail = tail[len(label) + 2:].strip()
                     self.q.put(json.dumps({"event": "log",
-                                           "message": f"[{label}] "
-                                           + (r.stdout or "").strip().splitlines()[-1]
-                                           if r.stdout else f"[{label}] 완료"}))
+                                           "message": f"[{label}] {tail}"}))
                 except Exception as e:                         # noqa: BLE001
                     self.q.put(json.dumps({"event": "log",
                                            "message": f"[{label}] 실패(무시): {e}"}))
-            self.q.put({"__loaded__": str(run)})
+            self.q.put({"__single_done__": True})
         threading.Thread(target=worker, daemon=True).start()
         # 즉시 metrics 로드 (그림·리포트를 기다리지 않는다)
         self._load_run(run)

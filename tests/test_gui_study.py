@@ -14,8 +14,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.study_link import (build_study_base_config, collect_study_members,
-                             parse_study_line, study_arch_from_run_name,
+                             fmt_hms, parse_study_line, study_arch_from_run_name,
                              study_config_diff, validate_study_name)
+
+
+def test_fmt_hms():
+    assert fmt_hms(0) == "00:00:00"
+    assert fmt_hms(59) == "00:00:59"
+    assert fmt_hms(3661) == "01:01:01"
+    assert fmt_hms(-5) == "00:00:00"       # 음수 방어
 
 
 # --------------------------------------------------------------- run 이름
