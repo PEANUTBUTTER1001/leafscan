@@ -17,4 +17,4 @@ pillow
 
 # 선택 — 있으면 실험 추적에 사용, 없어도 학습은 정상 완주 (P8)
 # mlflow
-# wandb
+wandb

@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -128,6 +129,9 @@ DEFAULTS = {
     # AMP(혼합정밀) — CUDA 에서만 적용된다. 기본 켜짐(기존 동작).
     # fp16 오버플로로 loss 가 NaN 이 되는 경우가 있어 끌 수 있게 노출한다.
     "amp":              (tk.BooleanVar, True),
+    # wandb 실험 추적 — 미설치/미로그인이어도 학습은 정상 완주 (P8).
+    # 로그인 상태면 online, 아니면 offline(로컬 wandb/ 폴더)으로 기록된다.
+    "use_wandb":        (tk.BooleanVar, True),
 }
 # Study 모드 기본값 (초기화 대상)
 DEFAULT_MODE = "단일 실행"
@@ -388,6 +392,7 @@ class LabApp(tk.Tk):
         self.q = queue.Queue()
         self.baseline = None
         self.current_run = None
+        self.wandb_url = None    # 실행 중인 run 의 wandb URL (worker 이벤트로 갱신)
         self.log_fp = None
         self.head_data = []   # [(head, logits, labels, names)]
         self.current_metrics = None
@@ -592,6 +597,8 @@ class LabApp(tk.Tk):
         self.run_combo.bind("<<ComboboxSelected>>", lambda e: self._set_baseline())
         ttk.Button(top, text="이 run 보기", command=self._view_selected).pack(
             side="right", padx=(0, 6))
+        ttk.Button(top, text="wandb 보기", command=self._open_wandb).pack(
+            side="right", padx=(0, 6))
 
         body = ttk.Frame(self, padding=(12, 0, 12, 12))
         body.pack(fill="both", expand=True)
@@ -746,6 +753,12 @@ class LabApp(tk.Tk):
                         variable=self.v["amp"]).pack(anchor="w", pady=(6, 0))
         ttk.Label(adv_t, text="빠르지만 fp16 오버플로로 loss 가 NaN 이 되면 "
                              "해제하고 다시 실행하세요. CPU 에서는 무시됩니다.",
+                  style="Hint.TLabel", wraplength=320).pack(anchor="w")
+        ttk.Checkbutton(adv_t, text="wandb 실험 추적 (Weights & Biases)",
+                        variable=self.v["use_wandb"]).pack(anchor="w", pady=(6, 0))
+        ttk.Label(adv_t, text="터미널에서 `wandb login` 을 한 번 해두면 서버에 "
+                             "실시간 기록됩니다. 미로그인 시 로컬(wandb/)에 "
+                             "offline 기록 후 `wandb sync` 로 올릴 수 있습니다.",
                   style="Hint.TLabel", wraplength=320).pack(anchor="w")
 
         # ④ 실행 — 가설 입력(실행 전 강제)
@@ -1125,6 +1138,8 @@ class LabApp(tk.Tk):
             patience=int(self.v["patience"].get()),
             seed=int(self.v["seed"].get()),
             amp=bool(self.v["amp"].get()),
+            use_wandb=bool(self.v["use_wandb"].get()),
+            wandb_project="leafscan-lab",
             num_workers="auto",   # index_csv 에서 병렬 로딩 (워커가 CPU 수로 결정)
             device="auto",
             hypothesis=self.hypo_text.get("1.0", "end").strip(),
@@ -1442,6 +1457,7 @@ class LabApp(tk.Tk):
     def _dispatch(self, msg):
         ev = msg.get("event")
         if ev == "start":
+            self.wandb_url = None   # 새 worker 시작 — 이전 run 의 URL 을 버린다
             self._log(f"  device={msg.get('device')} · arch={msg.get('arch')} "
                       f"· heads={msg.get('heads')}")
         elif ev == "log":
@@ -1473,6 +1489,9 @@ class LabApp(tk.Tk):
             self._log_live(f"  {self._spin_char()} {msg.get('name','')} ...")
         elif ev == "progress":
             self._render_progress(msg)
+        elif ev == "wandb":
+            # worker 가 알려주는 이번 run 의 wandb URL — 'wandb 보기' 버튼이 쓴다
+            self.wandb_url = msg.get("url")
         elif ev == "error":
             self._log("[실패] " + msg.get("message", "")
                       + f" (유형: {msg.get('kind','?')})")
@@ -1839,6 +1858,44 @@ class LabApp(tk.Tk):
 
     def _open_study_dir(self):
         self._open_path(self._study_target_dir(), "Study 폴더")
+
+    # ------------------------------------------------- wandb 바로가기
+    @staticmethod
+    def _read_wandb_url(run_dir):
+        """run 폴더의 wandb.json 에서 run URL 을 읽는다. 없으면 None."""
+        try:
+            return json.loads((Path(run_dir) / "wandb.json")
+                              .read_text(encoding="utf-8")).get("run_url")
+        except Exception:  # noqa: BLE001 — 파일 없음/손상 모두 '기록 없음'
+            return None
+
+    def _find_wandb_url(self):
+        """열 URL 을 고른다 — 보고 있는 run > 실행 중 run > 프로젝트 페이지."""
+        if self.current_run:
+            url = self._read_wandb_url(self.current_run)
+            if url:
+                return url, f"run {Path(self.current_run).name}"
+        if self.wandb_url:
+            return self.wandb_url, "실행 중인 run"
+        # 기록이 있는 가장 최근 run 에서 프로젝트 페이지 URL 을 만든다
+        cands = sorted(RUNS.rglob("wandb.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in cands:
+            url = self._read_wandb_url(f.parent)
+            if url and "/runs/" in url:
+                return url.split("/runs/")[0], "프로젝트 페이지"
+        return None, None
+
+    def _open_wandb(self):
+        url, what = self._find_wandb_url()
+        if not url:
+            messagebox.showinfo(
+                "wandb", "아직 wandb 에 기록된 run 이 없습니다.\n\n"
+                "학습을 한 번 실행하면 (고급 › wandb 실험 추적 켜짐, online 상태) "
+                "이 버튼으로 해당 run 을 바로 열 수 있습니다.")
+            return
+        webbrowser.open(url)
+        self._log(f"[wandb] {what} 열기 → {url}")
 
     def _on_close(self):
         if self.proc and self.proc.poll() is None:

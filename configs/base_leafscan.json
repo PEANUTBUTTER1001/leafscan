@@ -22,6 +22,8 @@
   "class_weight": "auto",
   "class_weight_head": "stage",
   "ambiguous_policy": "include",
+  "use_wandb": true,
+  "wandb_project": "leafscan-lab",
   "hypothesis": "",
   "tags": [],
   "study": null,
