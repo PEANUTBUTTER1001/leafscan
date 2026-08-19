@@ -106,6 +106,9 @@ DEFAULTS = {
     "augment":          (tk.BooleanVar, True),
     "arch":             (tk.StringVar,  "resnet18"),
     "img_size":         (tk.IntVar,     224),
+    # 빠른 학습 — 체크 시 원본(915×1060급)을 학습 전에 256px 로 축소한 캐시로
+    # 학습해 빠르다. 기본은 해제 = 기존 방식(원본 그대로 디코딩) 그대로.
+    "fast_train":       (tk.BooleanVar, False),
     "pretrained":       (tk.BooleanVar, True),
     "freeze_epochs":    (tk.IntVar,     3),
     # simple_cnn 전용
@@ -706,6 +709,12 @@ class LabApp(tk.Tk):
             style="Hint.TLabel", wraplength=330)
         self.imgsize_row = self._seg(m, self.v["img_size"],
                                      [32, 64, 128, 192, 224], "입력 해상도")
+        ttk.Checkbutton(self.imgsize_row, text="빠른 학습",
+                        variable=self.v["fast_train"]).pack(side="left", padx=(10, 0))
+        ttk.Label(m, text="빠른 학습 — 체크 시 원본(915×1060급)을 학습 전에 "
+                          "256px 로 축소(캐시)해 빠르게 학습합니다. "
+                          "해제(기본) 시 원본 이미지를 그대로 사용합니다 (느림).",
+                  style="Hint.TLabel", wraplength=330).pack(anchor="w")
         ttk.Checkbutton(m, text="pretrained (ImageNet 가중치)",
                         variable=self.v["pretrained"]).pack(anchor="w", pady=(4, 0))
         self._slider(m, "freeze epoch", self.v["freeze_epochs"], 0, 10, 1,
@@ -1124,6 +1133,7 @@ class LabApp(tk.Tk):
             augment=bool(self.v["augment"].get()),
             arch=self.v["arch"].get(),
             img_size=int(self.v["img_size"].get()),
+            fast_train=bool(self.v["fast_train"].get()),
             pretrained=bool(self.v["pretrained"].get()),
             freeze_epochs=int(self.v["freeze_epochs"].get()),
             epochs=int(self.v["epochs"].get()),
