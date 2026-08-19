@@ -6,6 +6,7 @@ P1: build_transforms / FakeCIFAR / build_datasets 를 train_worker.py 에서
 이후 P4b 에서 index_csv 데이터셋·StratifiedGroupKFold·crop_mode 가 붙는다.
 """
 import csv
+import os
 import random
 from pathlib import Path
 
@@ -143,15 +144,41 @@ def crop_by_mode(img, bbox, mode):
     return img.crop((left, top, right, bottom))
 
 
+def cache_image(r, data_root, cache_dir, cache_size=256, crop_mode="full"):
+    """row 하나의 사전 리사이즈 캐시를 보장한다. 반환: True=새로 생성, False=이미 있음.
+
+    IndexCsvDataset 의 지연 캐시와 scripts/preprocess.py 의 일괄 생성이 공유하는
+    단일 구현. bbox 좌표는 원본 해상도 기준이므로 crop 을 리사이즈 전에 적용한다.
+    tmp 파일 + os.replace 로 원자적 교체 — 병렬 worker 동시 접근 안전.
+    """
+    from PIL import Image
+    cpath = Path(cache_dir) / r["path"]
+    if cpath.exists():
+        return False
+    with Image.open(Path(data_root) / r["path"]) as im:
+        im = im.convert("RGB")
+        im = crop_by_mode(im, r.get("bbox_t"), crop_mode)
+    im = im.resize((int(cache_size), int(cache_size)), Image.BILINEAR)
+    cpath.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cpath.with_name(cpath.name + f".tmp{os.getpid()}")
+    im.save(tmp, "JPEG", quality=92)
+    os.replace(tmp, cpath)
+    return True
+
+
 class IndexCsvDataset(torch.utils.data.Dataset):
     """index.csv 기반 멀티헤드 데이터셋. (image, {"crop":int,"stage":int}) 반환.
 
     · 이미지는 convert('RGB') 강제 (흑백/RGBA 혼재 대응)
     · crop_mode: full / bbox / bbox_expand
+    · cache_dir: 사전 리사이즈 캐시. 원본(1500×2000급) JPEG 디코딩이 epoch 시간의
+      병목이므로, 최초 접근 시 crop_mode 적용 후 cache_size²로 줄여 저장하고
+      이후에는 캐시만 읽는다. bbox 좌표는 원본 해상도 기준이므로 반드시
+      리사이즈 전에 crop 을 적용한다 (캐시 경로가 crop_mode 별로 분리되는 이유).
     """
 
     def __init__(self, rows, indices, crop_names, stage_names, transform,
-                 crop_mode="full", data_root="."):
+                 crop_mode="full", data_root=".", cache_dir=None, cache_size=256):
         self.rows = rows
         self.indices = list(indices)
         self.crop_idx = {c: i for i, c in enumerate(crop_names)}
@@ -159,18 +186,32 @@ class IndexCsvDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.crop_mode = crop_mode
         self.data_root = Path(data_root)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_size = int(cache_size)
 
     def __len__(self):
         return len(self.indices)
 
-    def __getitem__(self, i):
+    def _load_original(self, r):
         from PIL import Image
-        r = self.rows[self.indices[i]]
-        path = self.data_root / r["path"]
-        with Image.open(path) as im:
+        with Image.open(self.data_root / r["path"]) as im:
             im = im.convert("RGB")
-            im = crop_by_mode(im, r.get("bbox_t"), self.crop_mode)
-            x = self.transform(im)
+            return crop_by_mode(im, r.get("bbox_t"), self.crop_mode)
+
+    def _load_image(self, r):
+        from PIL import Image
+        if self.cache_dir is None:
+            return self._load_original(r)
+        cpath = self.cache_dir / r["path"]
+        if not cpath.exists():
+            cache_image(r, self.data_root, self.cache_dir,
+                        self.cache_size, self.crop_mode)
+        with Image.open(cpath) as im:
+            return im.convert("RGB")
+
+    def __getitem__(self, i):
+        r = self.rows[self.indices[i]]
+        x = self.transform(self._load_image(r))
         y = {"crop": self.crop_idx[r["crop"]], "stage": self.stage_idx[r["stage"]]}
         return x, y
 
@@ -264,6 +305,20 @@ def build_multihead_data(cfg, log=None):
     amb_policy = cfg.get("ambiguous_policy", "include")
     idx["train"], _ = _apply_ambiguous(rows, idx["train"], amb_policy)
 
+    # subset: 전체 N장으로 제한 (빠른확인용). split 별 비율 유지, 시드 고정.
+    # 그룹 분할이 끝난 뒤 각 split 안에서만 뽑으므로 그룹 누수는 생기지 않는다.
+    subset = int(cfg.get("subset") or 0)
+    if subset and subset < len(rows):
+        frac = subset / len(rows)
+        rng = random.Random(seed)
+        for part in ("train", "val", "test"):
+            k = max(1, round(len(idx[part]) * frac))
+            if k < len(idx[part]):
+                idx[part] = sorted(rng.sample(list(idx[part]), k))
+        log(f"subset={subset} 적용 — train {len(idx['train'])}장 / "
+            f"val {len(idx['val'])}장 / test {len(idx['test'])}장 "
+            f"(전체 {len(rows)}장에서 축소)")
+
     # transform: arch 의 norm/size 를 따른다
     from tasks.models_registry import get_spec
     arch = cfg.get("arch", "resnet18")
@@ -273,8 +328,23 @@ def build_multihead_data(cfg, log=None):
                                               bool(cfg.get("augment", False)))
     crop_mode = cfg.get("crop_mode", "full")
     data_root = index_csv.parent
+
+    # 사전 리사이즈 캐시. 빠른 학습(fast_train) 체크 시 원본(예: 915×1060)을
+    # 최초 epoch 에 cache_size(256px)로 축소·저장해 재사용한다. 기본은 해제 —
+    # 기존 방식 그대로 원본 이미지를 매번 디코딩해 학습한다 (느리지만 원본 화질).
+    cache_size = int(cfg.get("cache_size", 256))
+    cache_dir = None
+    fast_train = bool(cfg.get("fast_train", False))
+    if fast_train and img_size <= cache_size:
+        cache_dir = data_root / "_cache" / f"{crop_mode}_{cache_size}"
+        log(f"빠른 학습 — 원본을 {cache_size}px 로 축소한 캐시 사용: {cache_dir} "
+            f"(최초 epoch 에 생성, 이후 재사용)")
+    elif not fast_train:
+        log("빠른 학습 해제 — 원본 해상도 이미지를 그대로 디코딩해 학습합니다 "
+            "(품질 우선 · epoch 시간이 크게 늘어납니다)")
     mk = lambda ilist, tf: IndexCsvDataset(
-        rows, ilist, crop_names, stage_names, tf, crop_mode, data_root)
+        rows, ilist, crop_names, stage_names, tf, crop_mode, data_root,
+        cache_dir=cache_dir, cache_size=cache_size)
     train_ds = mk(idx["train"], train_tf)
     val_ds = mk(idx["val"], eval_tf)
     test_ds = mk(idx["test"], eval_tf)
