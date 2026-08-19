@@ -26,6 +26,9 @@ ENV/
 *.tmp
 *.bak
 
+# 실험 추적 로컬 캐시 (mlruns/ 와 같은 성격 — wandb 가 run 마다 생성)
+wandb/
+
 # OS
 .DS_Store
 Thumbs.db

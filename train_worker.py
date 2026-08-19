@@ -346,8 +346,14 @@ def main():
 
     # 추적 (P8) — MLflow/wandb 미설치 시 조용히 no-op. run 이름 = 디렉터리명.
     tracker = Tracker(out.name, cfg, enable=bool(cfg.get("tracking", True)))
-    if tracker.active:
-        log("실험 추적 활성 (MLflow/wandb)")
+    for m in tracker.messages:
+        log(m)
+    if tracker.run_url:
+        # GUI 의 'wandb 보기' 버튼용 — 라이브 이벤트 + run 폴더에 영구 기록
+        emit(event="wandb", url=tracker.run_url)
+        (out / "wandb.json").write_text(
+            json.dumps({"run_url": tracker.run_url}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
 
     patience = int(cfg.get("patience", 0))
     best_val, best_epoch, bad = float("inf"), 0, 0
@@ -402,8 +408,11 @@ def main():
              loss=tr_loss, acc=tr_acc, val_loss=va_loss, val_acc=va_acc,
              per_head_acc=va_ph, best_epoch=best_epoch, improved=improved,
              elapsed=round(time.time() - t0, 1))
-        tracker.log_metrics({"loss": tr_loss, "val_loss": va_loss,
-                             "acc": tr_acc, "val_acc": va_acc}, step=e)
+        epoch_metrics = {"loss": tr_loss, "val_loss": va_loss,
+                         "acc": tr_acc, "val_acc": va_acc}
+        if len(heads) > 1:   # head 별 val acc 도 함께 남긴다 (예: val_acc_stage)
+            epoch_metrics.update({f"val_acc_{h}": v for h, v in va_ph.items()})
+        tracker.log_metrics(epoch_metrics, step=e)
         write_status(out, state="running", epoch=e)
 
         if patience and bad >= patience:
@@ -457,6 +466,19 @@ def main():
     prog.phase("metrics.json 저장")
     (out / "metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 최종 지표 요약을 추적 백엔드(run summary)에도 남긴다 — run 비교표의 기준값
+    summary = {"best_epoch": best_epoch, "epochs_ran": len(history),
+               "params": n_params, "elapsed_sec": metrics["elapsed_sec"]}
+    if history:
+        summary["best_val_loss"] = best_val
+        summary["best_val_acc"] = metrics["best_val_acc"]
+    for h, pm in (per_head_metrics or {}).items():
+        for k in ("accuracy", "macro_f1", "primary_recall", "abstain_rate"):
+            if isinstance(pm.get(k), (int, float)):
+                summary[f"{h}_{k}"] = pm[k]
+    tracker.log_summary(summary)
+    tracker.log_artifact(out / "metrics.json")
     tracker.end()
     write_status(out, state="done", epoch=len(history), failure_kind=None)
     emit(event="done", run_id=out.name,

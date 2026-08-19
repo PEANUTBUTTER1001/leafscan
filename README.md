@@ -568,8 +568,33 @@ python -c "from core.data_summary import *; print(format_summary(summarize_index
 | head 가중치 | crop과 stage 중 어디에 비중을 둘지 |
 | class weight | 소수 클래스(정식기)를 얼마나 챙길지 |
 | 기준 run | 선택하면 모든 지표에 **델타**가 붙음 |
+| wandb 보기 | 우측 상단 버튼. 보고 있는 run → 실행 중 run → 프로젝트 대시보드 순으로 wandb 웹페이지를 엶. 아래 상세 |
 | threshold 슬라이더 | 즉시 반응. 재학습 없이 판정 기준만 바꿔봄 |
 | 혼동행렬 셀 | 클릭하면 그 조합의 실제 오분류 이미지가 뜸 |
+
+#### 📊 wandb 실험 추적 (Weights & Biases)
+
+학습이 [wandb](https://wandb.ai) 서버에 실시간으로 기록되고, 우측 상단 **"wandb 보기"** 버튼으로 바로 열어볼 수 있습니다.
+
+| 기록 시점 | 내용 |
+|---|---|
+| epoch 마다 | loss · val_loss · acc · val_acc + head 별 정확도 (`val_acc_crop`, `val_acc_stage`) |
+| 학습 종료 | stage macro-F1 · 정식기 recall · crop accuracy 등 최종 요약 + `metrics.json` 첨부 |
+| Study 실행 | study 이름으로 run 들이 **그룹**으로 묶여 모델 비교가 한 화면에 |
+
+**셋업 (PC 당 최초 1회):**
+
+```bash
+pip install wandb
+wandb login        # https://wandb.ai/authorize 의 API 키 입력 (화면에 안 보이는 게 정상)
+```
+
+알아둘 것:
+
+* **미설치·미로그인이어도 학습은 정상 완주**합니다. 미로그인이면 로컬 `wandb/` 폴더에
+  offline 기록되고, 나중에 `wandb login` 후 `wandb sync wandb/offline-run-...` 으로 올릴 수 있습니다.
+* 켜고 끄기: `③ 학습 설정 › 고급 › "wandb 실험 추적"` 체크박스 (기본 켜짐).
+* 구현 상세와 문제 해결은 `05_wandb_연동.md` 참조.
 
 #### ⚡ 빠른 학습 (이미지 사전 축소 캐시)
 
