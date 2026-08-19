@@ -329,13 +329,12 @@ def build_multihead_data(cfg, log=None):
     crop_mode = cfg.get("crop_mode", "full")
     data_root = index_csv.parent
 
-    # 사전 리사이즈 캐시. 빠른 학습(fast_train, 기본 체크) 이면 원본
-    # (예: 915×1060)을 최초 epoch 에 cache_size(256px)로 축소·저장해 재사용한다.
-    # 체크 해제 시 캐시 없이 원본 이미지를 매번 그대로 디코딩해 학습한다
-    # (품질 우선 · epoch 시간이 크게 늘어난다).
+    # 사전 리사이즈 캐시. 빠른 학습(fast_train) 체크 시 원본(예: 915×1060)을
+    # 최초 epoch 에 cache_size(256px)로 축소·저장해 재사용한다. 기본은 해제 —
+    # 기존 방식 그대로 원본 이미지를 매번 디코딩해 학습한다 (느리지만 원본 화질).
     cache_size = int(cfg.get("cache_size", 256))
     cache_dir = None
-    fast_train = bool(cfg.get("fast_train", cfg.get("image_cache", True)))
+    fast_train = bool(cfg.get("fast_train", False))
     if fast_train and img_size <= cache_size:
         cache_dir = data_root / "_cache" / f"{crop_mode}_{cache_size}"
         log(f"빠른 학습 — 원본을 {cache_size}px 로 축소한 캐시 사용: {cache_dir} "
