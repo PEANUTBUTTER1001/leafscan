@@ -54,6 +54,22 @@ FIGURES = BASE / "make_figures.py"
 REPORT = BASE / "make_report.py"
 STUDY_RUNNER = BASE / "run_study.py"
 STUDY_FIGURES = BASE / "scripts" / "make_study.py"
+TEST_EVALUATOR = BASE / "evaluate_test.py"
+
+
+def _list_test_evaluations(run):
+    """가벼운 GUI 표시용 평가 이력 검색(torch import 없음)."""
+    root = Path(run) / "test_evaluations"
+    if not root.is_dir():
+        return []
+    return sorted((p for p in root.iterdir()
+                   if p.is_dir() and (p / "test_metrics.json").exists()),
+                  key=lambda p: p.name)
+
+
+def _latest_test_evaluation(run):
+    items = _list_test_evaluations(run)
+    return items[-1] if items else None
 
 
 def _console_python():
@@ -392,6 +408,9 @@ class LabApp(tk.Tk):
         self.font = pick_font()
         self._style()
         self.proc = None
+        self.final_test_proc = None
+        self.final_test_stop_requested = False
+        self.final_test_started = None
         self.q = queue.Queue()
         self.baseline = None
         self.current_run = None
@@ -570,7 +589,7 @@ class LabApp(tk.Tk):
         그만큼 로그 영역이 넓어진다.
         """
         for btn in (self.study_md_btn, self.study_dir_btn,
-                    self.report_btn, self.concl_btn):
+                    self.report_btn, self.concl_btn, self.final_test_btn):
             btn.pack_forget()
         if study:
             # 먼저 pack 한 쪽이 더 오른쪽 → 'Study 폴더 열기' 가 왼쪽에 온다
@@ -580,6 +599,7 @@ class LabApp(tk.Tk):
             self.concl_label.config(text="Study 결과 (결론은 STUDY.md 에 작성)")
         else:
             self.report_btn.pack(side="right")
+            self.final_test_btn.pack(side="right", padx=(0, 6))
             self.concl_btn.pack(side="right", padx=(0, 6))
             self.concl_text.pack(fill="x", pady=(2, 6), before=self.log_label)
             self.concl_label.config(text="결론 (결과 해석 — report.md §7 에 반영)")
@@ -594,7 +614,7 @@ class LabApp(tk.Tk):
                   style="Hint.TLabel").pack(side="left", padx=(4, 0))
         ttk.Label(top, textvariable=self.status_text, style="Hint.TLabel").pack(side="right")
         ttk.Label(top, text="기준 run:", style="Hint.TLabel").pack(side="right", padx=(12, 4))
-        self.run_combo = ttk.Combobox(top, textvariable=self.baseline_var, width=22,
+        self.run_combo = ttk.Combobox(top, textvariable=self.baseline_var, width=44,
                                       state="readonly")
         self.run_combo.pack(side="right")
         self.run_combo.bind("<<ComboboxSelected>>", lambda e: self._set_baseline())
@@ -983,6 +1003,7 @@ class LabApp(tk.Tk):
         self.study_dir_btn = ttk.Button(cf, text="Study 폴더 열기",
                                         command=self._open_study_dir)
         self.report_btn = ttk.Button(cf, text="report.md 열기", command=self._open_report)
+        self.final_test_btn = ttk.Button(cf, text="FINAL TEST", command=self._start_final_test)
         self.concl_btn = ttk.Button(cf, text="결론 저장", command=self._save_conclusion)
         self.concl_text = tk.Text(p, height=3, font=(self.font, 9), wrap="word")
         self.concl_text.pack(fill="x", pady=(2, 6))
@@ -1076,9 +1097,25 @@ class LabApp(tk.Tk):
         return SPINNER[self._spin]
 
     # ----------------------------------------------------------- run 관리
+    @staticmethod
+    def _run_display_name(run):
+        """runs 기준 상대 경로를 콤보박스 표시용 POSIX 경로로 만든다."""
+        return Path(run).relative_to(RUNS).as_posix()
+
+    @staticmethod
+    def _run_path_from_name(name):
+        """콤보박스의 상대 경로를 실제 run 폴더로 복원한다."""
+        return RUNS / Path(*str(name).replace("\\", "/").split("/"))
+
     def _refresh_runs(self):
-        runs = sorted([p.name for p in RUNS.glob("*")
-                       if (p / "metrics.json").exists()])
+        # 단일 run(exp_001)뿐 아니라 Study 멤버(study_03/member)도 포함한다.
+        # test_evaluations 아래에는 metrics.json이 없고 test_metrics.json만 있으므로
+        # 최종 평가 이력이 run 후보로 잘못 노출되지 않는다.
+        metric_paths = list(RUNS.glob("*/metrics.json"))
+        metric_paths += list(RUNS.glob("*/*/metrics.json"))
+        run_paths = sorted({p.parent for p in metric_paths},
+                           key=lambda p: self._run_display_name(p))
+        runs = [self._run_display_name(p) for p in run_paths]
         self.run_combo["values"] = ["(없음)"] + runs
         if self.baseline_var.get() not in self.run_combo["values"]:
             self.baseline_var.set("(없음)")
@@ -1089,8 +1126,9 @@ class LabApp(tk.Tk):
             self.baseline = None
         else:
             try:
+                run = self._run_path_from_name(name)
                 self.baseline = json.loads(
-                    (RUNS / name / "metrics.json").read_text(encoding="utf-8"))
+                    (run / "metrics.json").read_text(encoding="utf-8"))
                 self._log(f"[기준 run] {name} 선택")
             except Exception as e:                             # noqa: BLE001
                 self.baseline = None
@@ -1102,7 +1140,7 @@ class LabApp(tk.Tk):
         name = self.baseline_var.get()
         if name == "(없음)":
             return
-        run = RUNS / name
+        run = self._run_path_from_name(name)
         if (run / "metrics.json").exists():
             self.current_run = run
             try:
@@ -1110,6 +1148,129 @@ class LabApp(tk.Tk):
                 self._log(f"[보기] {name} 로드")
             except Exception as e:                             # noqa: BLE001
                 self._log(f"[경고] {name} 로드 실패: {e}")
+
+    def _start_final_test(self):
+        """Run the immutable final-test worker only after explicit confirmation."""
+        if (self.proc and self.proc.poll() is None) or self.is_study:
+            messagebox.showinfo("FINAL TEST", "학습 또는 Study가 끝난 뒤 실행하세요.")
+            return
+
+        # PyTorch/torchvision을 GUI 시작 시 로드하지 않고 FINAL TEST 클릭 시에만 로드한다.
+        from core.test_evaluation import final_test_command, validate_run
+
+        # 콤보박스에서 run만 선택하고 '이 run 보기'를 누르지 않은 경우에도
+        # 선택값을 평가 대상으로 사용한다. 다른 run이 화면에 남아 있을 때는
+        # 잘못된 모델을 평가하지 않도록 선택값을 우선한다.
+        selected = self.baseline_var.get()
+        if selected != "(없음)":
+            run = self._run_path_from_name(selected)
+            if (run / "metrics.json").exists() and self.current_run != run:
+                self.current_run = run
+                try:
+                    self._load_run(run)
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showerror("FINAL TEST", f"run 결과를 불러오지 못했습니다.\n{exc}")
+                    return
+        else:
+            run = self.current_run
+        if run is None:
+            messagebox.showinfo("FINAL TEST", "완료된 index_csv run을 먼저 선택하세요.")
+            return
+        try:
+            validate_run(run)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("FINAL TEST", str(exc))
+            return
+        existing = _list_test_evaluations(run)
+        rerun = bool(existing)
+        reason = None
+        if rerun:
+            if not messagebox.askyesno(
+                    "FINAL TEST 재평가",
+                    "기존 평가가 있습니다. 재평가 하겠습니까?",
+                    parent=self):
+                return
+            reason = "GUI에서 사용자가 재평가를 확인함"
+        cmd = final_test_command(PYTHON, TEST_EVALUATOR, run, rerun, reason)
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
+                   PYTHONUNBUFFERED="1")
+        kw = {}
+        if os.name == "nt":
+            kw["creationflags"] = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        else:
+            kw["start_new_session"] = True
+        self.final_test_proc = subprocess.Popen(
+            cmd, cwd=str(BASE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env=env, **kw)
+        self.final_test_stop_requested = False
+        self.final_test_started = time.time()
+        self.final_test_btn.config(state="disabled")
+        self.run_btn.config(state="disabled")
+        self.stop_btn.config(state="normal", text="■ 테스트 중단")
+        self.reset_btn.config(state="disabled")
+        self.status_text.set(f"FINAL TEST 평가 중 · {run.name}")
+        self._log(f"[FINAL TEST] {run.name} 평가 시작 · test만 사용")
+        threading.Thread(target=self._final_test_reader,
+                         args=(self.final_test_proc,), daemon=True).start()
+        self._final_test_pulse()
+
+    def _final_test_reader(self, proc):
+        """최종 테스트 subprocess의 stdout을 GUI 큐로 전달한다."""
+        for line in proc.stdout:
+            self.q.put({"__final_test_line__": line.rstrip()})
+        self.q.put({"__final_test_exit__": proc.wait()})
+
+    def _final_test_pulse(self):
+        """평가 중 로그 마지막 줄과 상태 표시를 갱신한다."""
+        proc = self.final_test_proc
+        if proc is None or proc.poll() is not None:
+            return
+        name = self.current_run.name if self.current_run else "-"
+        char = self._spin_char()
+        elapsed = fmt_hms(time.time() - self.final_test_started) if self.final_test_started else "00:00:00"
+        self.status_text.set(f"{char} FINAL TEST 평가 중 · {name} · 경과 {elapsed}")
+        self._log_live(f"  {char} FINAL TEST 평가 중 · test만 사용 · 경과 {elapsed}")
+        self.after(300, self._final_test_pulse)
+
+    def _on_final_test_line(self, line):
+        if line:
+            self._log("  " + line)
+
+    def _on_final_test_done(self, code):
+        stopped = self.final_test_stop_requested
+        self.final_test_proc = None
+        self.final_test_stop_requested = False
+        self.final_test_started = None
+        self._log_live_clear()
+        self.final_test_btn.config(state="normal")
+        self.run_btn.config(state="normal")
+        self.stop_btn.config(state="disabled", text="■  중단")
+        self.reset_btn.config(state="normal")
+        if stopped:
+            self.status_text.set("FINAL TEST 중단됨")
+            self._log("[FINAL TEST] 사용자가 평가를 중단했습니다.")
+            return
+        if code:
+            self.status_text.set("FINAL TEST 실패")
+            self._log(f"[FINAL TEST] 실패: exit={code}")
+            return
+        ev = _latest_test_evaluation(self.current_run)
+        self.status_text.set(f"FINAL TEST 완료 · {ev.name if ev else '-'}")
+        if ev:
+            self._log(f"[FINAL TEST] 테스트 완료 · {self.current_run.name} · "
+                      f"evaluation_id={ev.name}")
+            try:
+                result = json.loads((ev / "test_metrics.json").read_text(encoding="utf-8"))
+                for head, m in (result.get("per_head") or {}).items():
+                    self._log(f"  [{head}] accuracy={m.get('accuracy')} "
+                              f"macro-F1={m.get('macro_f1')} weighted-F1={m.get('weighted_f1')}")
+                self._log(f"  저장 위치: {ev}")
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"  결과 읽기 실패: {exc}")
+        else:
+            self._log("[FINAL TEST] 프로세스는 종료됐지만 평가 결과 폴더를 찾지 못했습니다.")
 
     def _next_run_dir(self):
         i = 1
@@ -1240,6 +1401,7 @@ class LabApp(tk.Tk):
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.reset_btn.config(state="disabled")   # 실행 중에는 초기화 금지
+        self.final_test_btn.config(state="disabled")
         self.status_text.set(f"학습 중 · {run_dir.name} · 0%")
 
     # ------------------------------------------------------------- Study
@@ -1332,6 +1494,7 @@ class LabApp(tk.Tk):
         self.run_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.reset_btn.config(state="disabled")   # 실행 중에는 초기화 금지
+        self.final_test_btn.config(state="disabled")
         self._lock_study_controls(True)
         self.status_text.set(f"Study 0/{len(archs)} · {name}")
 
@@ -1421,6 +1584,12 @@ class LabApp(tk.Tk):
             return False
 
     def stop_training(self):
+        if self.final_test_proc and self.final_test_proc.poll() is None:
+            self.final_test_stop_requested = True
+            if not self._kill_tree(self.final_test_proc):
+                self.final_test_proc.terminate()
+            self._log("[중단] FINAL TEST 프로세스 트리에 종료 신호를 보냈습니다")
+            return
         if self.proc and self.proc.poll() is None:
             if self.is_study:
                 # run_study.py 만 죽이면 자식 train_worker 가 고아로 남는다
@@ -1438,6 +1607,10 @@ class LabApp(tk.Tk):
                 if isinstance(item, dict):
                     if "__exit__" in item:
                         self._on_exit(item["__exit__"])
+                    elif "__final_test_line__" in item:
+                        self._on_final_test_line(item["__final_test_line__"])
+                    elif "__final_test_exit__" in item:
+                        self._on_final_test_done(item["__final_test_exit__"])
                     elif "__study_done__" in item:
                         self._finish_study_log()
                     elif "__single_done__" in item:
@@ -1552,6 +1725,7 @@ class LabApp(tk.Tk):
         self.run_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.reset_btn.config(state="normal")
+        self.final_test_btn.config(state="normal")
         run = self.current_run
         self._log_live_clear()
         if run and (run / "metrics.json").exists():
@@ -1590,6 +1764,7 @@ class LabApp(tk.Tk):
         self.run_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.reset_btn.config(state="normal")
+        self.final_test_btn.config(state="normal")
         self._lock_study_controls(False)
         study_dir = self.study_dir
         done = collect_study_members(study_dir)
@@ -1686,7 +1861,8 @@ class LabApp(tk.Tk):
                 r = subprocess.run(
                     [PYTHON, str(STUDY_FIGURES), "--study", str(study_dir)],
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    cwd=str(BASE), env=env)
+                    cwd=str(BASE), env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 for ln in (r.stdout or "").strip().splitlines():
                     self.q.put(json.dumps({"event": "log", "message": ln.strip()}))
                 if r.returncode == 0:
@@ -1721,7 +1897,8 @@ class LabApp(tk.Tk):
                     cmd.append("--no-catalog")
                 env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
                 r = subprocess.run(cmd, capture_output=True, text=True,
-                                   encoding="utf-8", env=env)
+                                   encoding="utf-8", env=env,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 lines = (r.stdout or "").strip().splitlines()
                 tail = lines[-1].strip() if lines else "완료"
                 # 스크립트가 이미 '[그림] …' 처럼 태그를 붙여 나오면 중복 제거
@@ -1822,6 +1999,15 @@ class LabApp(tk.Tk):
         self.status_text.set(
             f"완료 · {run.name} · macro-F1 "
             f"{s.get('stage_macro_f1') or s.get('val_acc') or '—'}")
+        ev = _latest_test_evaluation(run)
+        if ev:
+            self._log(f"[FINAL TEST] 기존 평가 {ev.name} · 결과 화면에서 조회 가능")
+        try:
+            cfg = json.loads((run / "config.json").read_text(encoding="utf-8"))
+            eligible = cfg.get("dataset") == "index_csv"
+        except Exception:  # noqa: BLE001
+            eligible = False
+        self.final_test_btn.config(state="normal" if eligible else "disabled")
 
     def _save_conclusion(self):
         run = self.current_run
@@ -1908,6 +2094,11 @@ class LabApp(tk.Tk):
         self._log(f"[wandb] {what} 열기 → {url}")
 
     def _on_close(self):
+        if self.final_test_proc and self.final_test_proc.poll() is None:
+            if not messagebox.askokcancel("종료", "FINAL TEST가 진행 중입니다. 중단하고 종료할까요?"):
+                return
+            if not self._kill_tree(self.final_test_proc):
+                self.final_test_proc.terminate()
         if self.proc and self.proc.poll() is None:
             if not messagebox.askokcancel("종료", "학습이 진행 중입니다. 중단하고 종료할까요?"):
                 return
