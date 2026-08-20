@@ -30,6 +30,7 @@ $sc = $shell.CreateShortcut($link)
 $sc.TargetPath       = $py
 $sc.Arguments        = '"' + $target + '"'
 $sc.WorkingDirectory = $base
+$sc.WindowStyle      = 7
 $sc.Description      = "LeafScan Lab - CNN 실험 콘솔"
 
 $icon = Join-Path $base "leafscan.ico"

@@ -205,6 +205,37 @@ def _reproduce(run: Path, cfg):
     return "\n".join(lines)
 
 
+def _final_test_section(run: Path):
+    """Render the latest immutable final-test history, if one exists."""
+    try:
+        from core.test_evaluation import latest_evaluation
+        evaluation = latest_evaluation(run)
+    except Exception:  # report generation must remain usable without test history
+        evaluation = None
+    if evaluation is None:
+        return None
+    result = json.loads((evaluation / "test_metrics.json").read_text(encoding="utf-8"))
+    meta = result.get("metadata", {})
+    lines = [
+        f"평가 ID: `{result.get('evaluation_id', evaluation.name)}`",
+        f"평가 시각: {meta.get('evaluated_at', '—')}",
+        f"test 이미지: {meta.get('test_images', '—')}장 · 그룹: {meta.get('test_groups', '—')}개",
+        f"checkpoint SHA-256: `{meta.get('checkpoint_hash', '—')}`",
+        "",
+        "| Head | Accuracy | Macro-F1 | Weighted-F1 |",
+        "|---|---:|---:|---:|",
+    ]
+    for head, hm in (result.get("per_head") or {}).items():
+        lines.append(f"| {head} | {hm.get('accuracy', '—')} | "
+                     f"{hm.get('macro_f1', '—')} | {hm.get('weighted_f1', '—')} |")
+    fig_dir = evaluation / "figures"
+    pngs = sorted(fig_dir.glob("*.png")) if fig_dir.is_dir() else []
+    if pngs:
+        lines += ["", "### 테스트 전용 그림", ""]
+        lines += [f"![{p.stem}](test_evaluations/{evaluation.name}/figures/{p.name})" for p in pngs]
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 # 메인
 # --------------------------------------------------------------------------
@@ -246,6 +277,10 @@ def generate_report(run_dir, baseline=None):
         "## 9. 재현 정보\n\n"
         + _fill_block("auto", "reproduce", _reproduce(run, cfg)),
     ]
+    final_test = _final_test_section(run)
+    if final_test:
+        parts.append("## 10. 최종 테스트 평가\n\n" +
+                     _fill_block("auto", "final-test", final_test))
     report_path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
     return report_path, ("⚠️ 미작성" not in concl)
 

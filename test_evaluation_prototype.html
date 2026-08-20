@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LeafScan Lab · 최종 테스트 평가 프로토타입</title>
+  <style>
+    :root { --ink:#18212b; --muted:#65717f; --line:#dce4e9; --paper:#f5f7f8; --panel:#fff; --green:#1b6d53; --green-bg:#e6f4ed; --amber:#8b5b08; --amber-bg:#fff5df; --blue:#27618a; --blue-bg:#eaf3fa; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); font:14px/1.55 "Segoe UI", "Malgun Gothic", sans-serif; background:var(--paper); }
+    header { height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 30px; color:#fff; background:#162b37; }
+    header h1 { margin:0; font-size:19px; letter-spacing:-.3px; } header span { color:#b9cad2; font-size:12px; }
+    main { max-width:1160px; margin:28px auto 44px; padding:0 22px; }
+    .title { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:18px; }
+    .title h2 { margin:0; font-size:26px; letter-spacing:-.8px; } .title p { margin:5px 0 0; color:var(--muted); }
+    .tag { padding:5px 9px; border-radius:999px; color:var(--blue); background:var(--blue-bg); font-size:12px; white-space:nowrap; }
+    .layout { display:grid; grid-template-columns:360px 1fr; gap:18px; }
+    .card { padding:20px; border:1px solid var(--line); border-radius:12px; background:var(--panel); box-shadow:0 1px 2px #18212b08; }
+    h3 { margin:0 0 14px; font-size:15px; } h4 { margin:22px 0 8px; font-size:13px; color:#40505d; }
+    label { display:block; margin:0 0 6px; color:#4f5d69; font-size:12px; font-weight:700; }
+    select, input { width:100%; padding:10px; border:1px solid #bdcbd4; border-radius:7px; color:var(--ink); background:#fff; font:inherit; }
+    .hint { margin:7px 0 0; color:var(--muted); font-size:12px; }
+    .check { display:flex; gap:9px; margin:11px 0; align-items:start; } .check input { width:auto; margin-top:3px; } .check b { display:block; font-size:13px; } .check small { display:block; color:var(--muted); }
+    .divider { height:1px; margin:18px 0; background:var(--line); }
+    .button { width:100%; padding:11px 14px; border:0; border-radius:7px; color:#fff; background:var(--green); font:inherit; font-weight:700; cursor:pointer; }
+    .button:disabled { cursor:not-allowed; opacity:.45; } .button.secondary { margin-top:8px; color:#40505d; background:#edf1f3; }
+    .notice { padding:14px 16px; border-radius:9px; background:var(--amber-bg); color:#6a4a0b; } .notice strong { display:block; margin-bottom:3px; }
+    .run { display:flex; justify-content:space-between; gap:12px; padding:13px 0; border-bottom:1px solid var(--line); } .run:last-child { border:0; } .run b { font-size:14px; } .run span { color:var(--muted); font-size:12px; }
+    .ok { color:var(--green); font-weight:700; } .pending { color:var(--amber); font-weight:700; }
+    .flow { display:grid; grid-template-columns:1fr 26px 1fr 26px 1fr; align-items:center; margin:17px 0 2px; text-align:center; } .step { min-height:88px; padding:13px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; } .step em { display:block; color:var(--green); font-size:11px; font-style:normal; font-weight:700; } .arrow { color:#92a0aa; font-size:20px; }
+    table { width:100%; margin-top:12px; border-collapse:collapse; font-size:13px; } th,td { padding:10px; border-bottom:1px solid var(--line); text-align:left; } th { color:#61707c; font-size:11px; text-transform:uppercase; letter-spacing:.4px; } td:last-child, th:last-child { text-align:right; }
+    .result { display:none; margin-top:18px; padding:16px; border-radius:10px; background:var(--green-bg); } .result.show { display:block; } .metric-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:10px; } .metric { padding:12px; border-radius:7px; background:#fff; } .metric small { color:var(--muted); } .metric b { display:block; margin-top:3px; font-size:21px; }
+    .modal { position:fixed; inset:0; display:none; place-items:center; padding:20px; background:#101a20a8; } .modal.show { display:grid; } .dialog { width:min(440px,100%); padding:24px; border-radius:12px; background:#fff; } .dialog h3 { font-size:18px; } .dialog p { color:#52616c; } .dialog footer { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; } .dialog button { padding:9px 13px; border:0; border-radius:7px; font:inherit; cursor:pointer; } .cancel { color:#41505c; background:#edf1f3; } .confirm { color:#fff; background:var(--green); }
+    @media(max-width:820px) { .layout { grid-template-columns:1fr; } .flow { grid-template-columns:1fr; gap:7px; } .arrow { transform:rotate(90deg); } .title { display:block; } .tag { display:inline-block; margin-top:10px; } }
+  </style>
+</head>
+<body>
+  <header><h1>LeafScan Lab <span>연구·학습 콘솔</span></h1><span>프로토타입 · 최종 테스트 평가</span></header>
+  <main>
+    <div class="title"><div><h2>최종 테스트 평가</h2><p>학습과 검증이 끝난 모델을 고정한 뒤, 미사용 테스트셋으로 한 번만 평가합니다.</p></div><span class="tag">학습 설정 변경 불가</span></div>
+    <div class="layout">
+      <aside class="card">
+        <h3>① 평가할 run 선택</h3>
+        <label for="run">완료된 run</label>
+        <select id="run"><option>study_03__arch-mobilenet_v3_small</option><option>study_03__arch-resnet18</option><option>study_03__arch-convnext_tiny</option></select>
+        <p class="hint">`best.pt`, `config.json`, 고정된 `split.json`이 있는 완료 run만 선택할 수 있습니다.</p>
+        <div class="divider"></div>
+        <h3>② 실행 전 확인</h3>
+        <div class="check"><input id="lock" type="checkbox" checked><div><b>모델·설정 고정 확인</b><small>선택한 `best.pt`와 config hash를 결과에 기록합니다.</small></div></div>
+        <div class="check"><input id="once" type="checkbox" checked><div><b>최종 평가 원칙 확인</b><small>테스트 결과로 모델·epoch·학습률을 다시 고르지 않습니다.</small></div></div>
+        <div class="check"><input id="reason" type="checkbox"><div><b>재평가 사유 기록</b><small>기존 테스트 결과가 있을 때만 활성화됩니다.</small></div></div>
+        <button class="button" id="start" disabled>테스트셋 최종 평가 시작</button>
+        <button class="button secondary">선택 run의 검증 결과 보기</button>
+      </aside>
+      <section>
+        <div class="card notice"><strong>테스트셋은 최종 시험지입니다.</strong>평가 중 모델 학습은 수행하지 않습니다. augmentation을 끈 평가 변환으로 5,957장을 예측하고 지표·혼동행렬만 생성합니다.</div>
+        <div class="card" style="margin-top:18px">
+          <h3>선택 run 상태 · study_03__arch-mobilenet_v3_small</h3>
+          <div class="run"><div><b>최적 모델 체크포인트</b><br><span>best.pt · best epoch 4 · validation loss 0.3164</span></div><span class="ok">준비됨</span></div>
+          <div class="run"><div><b>분리 테스트셋</b><br><span>5,957장 · 23개 그룹 · train/validation 그룹과 중복 0건</span></div><span class="ok">검증됨</span></div>
+          <div class="run"><div><b>이전 최종 테스트 평가</b><br><span>아직 없음</span></div><span class="pending">대기</span></div>
+          <h4>실행 흐름</h4>
+          <div class="flow"><div class="step"><em>1. 불러오기</em>best.pt<br>config.json</div><div class="arrow">→</div><div class="step"><em>2. 예측만 수행</em>test 5,957장<br>가중치 변경 없음</div><div class="arrow">→</div><div class="step"><em>3. 기록</em>지표·그림·보고서<br>평가 이력 저장</div></div>
+        </div>
+        <div class="card" style="margin-top:18px">
+          <h3>생성될 결과물</h3>
+          <table><thead><tr><th>파일</th><th>내용</th><th>상태</th></tr></thead><tbody>
+            <tr><td>test_evaluations/&lt;timestamp&gt;/test_metrics.json</td><td>head별 accuracy, macro-F1, 클래스별 P/R/F1</td><td>예정</td></tr>
+            <tr><td>test_evaluations/&lt;timestamp&gt;/figures/</td><td>테스트 혼동행렬·클래스별 F1·캘리브레이션</td><td>예정</td></tr>
+            <tr><td>report.md</td><td>최종 테스트 평가 요약 및 평가 이력 링크</td><td>예정</td></tr>
+          </tbody></table>
+          <div class="result" id="result"><b>✓ 프로토타입 실행 완료</b><div>실제 구현에서는 여기서 진행률과 저장 경로를 표시합니다.</div><div class="metric-grid"><div class="metric"><small>stage macro-F1</small><b>0.82xx</b></div><div class="metric"><small>정식기 recall</small><b>0.81xx</b></div><div class="metric"><small>수확기 F1</small><b>0.74xx</b></div></div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div class="modal" id="modal"><div class="dialog"><h3>최종 테스트 평가를 시작할까요?</h3><p>이 작업은 모델을 다시 학습하지 않습니다. 선택한 `best.pt`로 분리 테스트셋 5,957장을 예측하고, 결과를 별도 평가 이력으로 저장합니다.</p><label for="phrase">확인을 위해 <b>FINAL TEST</b>를 입력하세요.</label><input id="phrase" autocomplete="off" placeholder="FINAL TEST"><footer><button class="cancel" id="close">취소</button><button class="confirm" id="confirm" disabled>평가 시작</button></footer></div></div>
+  <script>
+    const start = document.querySelector('#start'), modal = document.querySelector('#modal'), phrase = document.querySelector('#phrase'), confirm = document.querySelector('#confirm');
+    const checks = [...document.querySelectorAll('#lock, #once')];
+    function ready(){ start.disabled = !checks.every(x => x.checked); }
+    checks.forEach(x => x.addEventListener('change', ready));
+    start.addEventListener('click', () => { modal.classList.add('show'); phrase.focus(); });
+    document.querySelector('#close').addEventListener('click', () => modal.classList.remove('show'));
+    phrase.addEventListener('input', () => confirm.disabled = phrase.value !== 'FINAL TEST');
+    confirm.addEventListener('click', () => { modal.classList.remove('show'); document.querySelector('#result').classList.add('show'); start.textContent = '평가 이력 생성됨'; start.disabled = true; });
+  </script>
+</body>
+</html>

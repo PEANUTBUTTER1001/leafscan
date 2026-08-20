@@ -636,6 +636,70 @@ wandb login        # https://wandb.ai/authorize 의 API 키 입력 (화면에 �
 
 **조작 전에 이 구분을 확인하면 몇 시간을 아낍니다.**
 
+### 5.4 최종 테스트셋 평가
+
+validation 결과로 확정한 모델을 재학습하거나 다시 선택하지 않고, 기존 `best.pt`를
+고정된 분리 test split에 한 번 평가할 수 있습니다. 최종 테스트는 모델 선택·Study
+순위 결정에 사용하지 않습니다.
+
+#### GUI에서 실행
+
+1. 완료된 `index_csv` run을 상단 `기준 run` 목록에서 선택합니다.
+   Study 멤버는 `study_03/study_03__arch-resnet18`처럼 표시됩니다.
+2. 결과 화면의 **FINAL TEST** 버튼을 누릅니다. `이 run 보기`를 먼저 누르지 않아도
+   선택한 run이 평가 대상으로 사용됩니다.
+3. 기존 평가가 있으면 재평가 확인창에서 **예**를 선택합니다.
+4. 평가 중에는 스피너·경과시간·실시간 로그가 표시되며, **■ 테스트 중단**으로 중단할
+   수 있습니다.
+
+#### CLI에서 실행
+
+```powershell
+python evaluate_test.py --run runs/study_03/study_03__arch-resnet18
+```
+
+재평가는 기존 결과를 덮어쓰지 않고 새 이력으로 저장합니다.
+
+```powershell
+python evaluate_test.py `
+  --run runs/study_03/study_03__arch-resnet18 `
+  --reevaluate --reason "재현성 확인"
+```
+
+대상 run은 `dataset=index_csv`, `status=done`, `best.pt`, `config.json`, 고정
+`split.json`, 원본 `index.csv`를 모두 갖춰야 합니다. `exp_###`처럼 학습 당시
+고정 `split.json`이 없는 예전 run은 데이터 누수를 막기 위해 평가를 중단합니다.
+
+#### 결과물
+
+평가가 끝나면 run 루트의 기존 `report.md`에 `## 10. 최종 테스트 평가`가 추가되고,
+head별 지표가 표로 기록됩니다.
+
+```markdown
+| Head | Accuracy | Macro-F1 | Weighted-F1 |
+|---|---:|---:|---:|
+| crop | 1.0 | 1.0 | 1.0 |
+| stage | 0.8677 | 0.7984 | 0.8708 |
+```
+
+평가별 원본과 테스트 전용 그림은 기존 validation 산출물과 분리해 보관합니다.
+
+```text
+runs/<run>/test_evaluations/<evaluation_id>/
+├─ test_metrics.json
+├─ evaluation_metadata.json
+├─ logits_*.npy · labels_*.npy
+└─ figures/
+   ├─ confusion_*.png
+   ├─ f1_per_class_*.png
+   ├─ calibration_*.png
+   └─ confidence_hist_*.png
+```
+
+`best.pt`, 기존 `metrics.json`, validation logits/labels·figures, `split.json`은
+수정하거나 덮어쓰지 않습니다. 별도 evaluation 폴더에는 `report.md`를 만들지 않고,
+run 루트의 `report.md`가 최신 평가를 요약합니다.
+
 ---
 
 ## 6. 실험 한 사이클
