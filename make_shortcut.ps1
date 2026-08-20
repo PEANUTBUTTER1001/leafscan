@@ -4,7 +4,12 @@
 $base = $PSScriptRoot
 if (-not $base) { $base = (Get-Location).Path }
 
-$py = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
+$localPyw = Join-Path $base ".venv\Scripts\pythonw.exe"
+$localPy = Join-Path $base ".venv\Scripts\python.exe"
+$py = if (Test-Path $localPyw) { $localPyw } else {
+    (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
+}
+if (-not $py -and (Test-Path $localPy)) { $py = $localPy }
 if (-not $py) { $py = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
 
 if (-not $py) {
