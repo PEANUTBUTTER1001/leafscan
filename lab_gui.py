@@ -612,16 +612,18 @@ class LabApp(tk.Tk):
         ttk.Label(top, text="1.0", style="Hint.TLabel").pack(side="left", padx=(4, 0))
         ttk.Label(top, text="  멀티헤드 · config 한 줄로 모델 교체",
                   style="Hint.TLabel").pack(side="left", padx=(4, 0))
-        ttk.Label(top, textvariable=self.status_text, style="Hint.TLabel").pack(side="right")
-        ttk.Label(top, text="기준 run:", style="Hint.TLabel").pack(side="right", padx=(12, 4))
-        self.run_combo = ttk.Combobox(top, textvariable=self.baseline_var, width=44,
+        # side='right'는 나중에 pack한 위젯이 더 왼쪽에 놓이므로,
+        # 화면에는 [기준 run:][콤보박스][run 보기][wandb 보기] 순서가 된다.
+        ttk.Button(top, text="wandb 보기", command=self._open_wandb).pack(
+            side="right", padx=(0, 6))
+        ttk.Button(top, text="run 보기", command=self._view_selected).pack(
+            side="right", padx=(0, 6))
+        self.run_combo = ttk.Combobox(top, textvariable=self.baseline_var, width=40,
                                       state="readonly")
         self.run_combo.pack(side="right")
         self.run_combo.bind("<<ComboboxSelected>>", lambda e: self._set_baseline())
-        ttk.Button(top, text="이 run 보기", command=self._view_selected).pack(
-            side="right", padx=(0, 6))
-        ttk.Button(top, text="wandb 보기", command=self._open_wandb).pack(
-            side="right", padx=(0, 6))
+        ttk.Label(top, text="기준 run:", style="Hint.TLabel").pack(
+            side="right", padx=(12, 4))
 
         body = ttk.Frame(self, padding=(12, 0, 12, 12))
         body.pack(fill="both", expand=True)
@@ -1156,7 +1158,16 @@ class LabApp(tk.Tk):
             return
 
         # PyTorch/torchvision을 GUI 시작 시 로드하지 않고 FINAL TEST 클릭 시에만 로드한다.
-        from core.test_evaluation import final_test_command, validate_run
+        try:
+            from core.test_evaluation import final_test_command, validate_run
+        except Exception as exc:  # noqa: BLE001
+            message = ("FINAL TEST 모듈을 불러오지 못했습니다.\n\n"
+                       "현재 GUI를 실행한 Python 환경에 torch·torchvision이 설치되어 있는지 "
+                       "확인하세요.\n\n"
+                       f"원인: {exc}")
+            messagebox.showerror("FINAL TEST 실행 불가", message)
+            self._log(f"[FINAL TEST] 모듈 로드 실패: {exc}")
+            return
 
         # 콤보박스에서 run만 선택하고 '이 run 보기'를 누르지 않은 경우에도
         # 선택값을 평가 대상으로 사용한다. 다른 run이 화면에 남아 있을 때는
@@ -1200,10 +1211,15 @@ class LabApp(tk.Tk):
                                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         else:
             kw["start_new_session"] = True
-        self.final_test_proc = subprocess.Popen(
-            cmd, cwd=str(BASE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            env=env, **kw)
+        try:
+            self.final_test_proc = subprocess.Popen(
+                cmd, cwd=str(BASE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                env=env, **kw)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("FINAL TEST 실행 불가", str(exc))
+            self._log(f"[FINAL TEST] subprocess 시작 실패: {exc}")
+            return
         self.final_test_stop_requested = False
         self.final_test_started = time.time()
         self.final_test_btn.config(state="disabled")
